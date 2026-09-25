@@ -252,12 +252,11 @@ function customHandler(body) {
 
 ## Contributing/tests
 
-The tests for the Mapbox and TAMU geocoders both require API keys.  To run those tests, you need those API keys in a `.env` file in the project's root folder that defines two environment variables like so:
+```
+npm test
+```
 
-```
-MAPBOX_API_KEY=123ABC
-TAMU_API_KEY=123ABC
-```
+The tests run offline: they start a fake geocoding API on localhost and run the real `csvgeocode` command (and the Node module) against it, so no API keys or network access are needed.
 
 ## Some Alternatives
 
