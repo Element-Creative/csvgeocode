@@ -1,6 +1,6 @@
 {
   "name": "csvgeocode",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Bulk geocode addresses in a CSV.",
   "type": "module",
   "main": "index.js",

@@ -1,7 +1,7 @@
 csvgeocode
 ==========
 
-For when you have a CSV with addresses and you want a lat/lng for every row.  Bulk geocode addresses a CSV with a few lines of code.
+For when you have a CSV with addresses and you want a lat/lng for every row.  Bulk geocode the addresses in a CSV with a few lines of code.
 
 The defaults are configured for [Google's geocoder](https://developers.google.com/maps/documentation/geocoding/) but it can be configured to work with any other similar geocoding service.  There are built-in response handlers for [Google](https://developers.google.com/maps/documentation/geocoding/), [Mapbox](https://www.mapbox.com/developers/api/geocoding/), [OSM Nominatim](http://nominatim.openstreetmap.org/), and [Texas A & M's](http://geoservices.tamu.edu/Services/Geocode/WebService/) geocoders (details below). Only the Google handler is maintained and in regular use; the others are unchanged from the original project and haven't been tested against their live services in years (see [`--handler`](#--handler-handler)).
 
@@ -44,7 +44,7 @@ The only required option is `url`.  All others are optional.
 
 #### `--url [url]` (REQUIRED)
 
-A URL template with column names in double curly braces, like `{{address}}`. Each one is replaced with that column's value for the row, URL-encoded (spaces become `+`; apostrophes, `&`, `#` and so on are safe). For example:
+A URL template with column names in double curly braces, like `{{address}}`. Each one is replaced with that column's value for the row, URL-encoded (apostrophes, `&`, `#` and so on are safe). Spaces become `+` in the query string (after the first `?`), since that's the only place `+` means a space; in the path, they're `%20` instead. For example:
 
 ```
 http://api.tiles.mapbox.com/v4/geocode/mapbox.places/{{address}}.json?access_token=MY_API_KEY
@@ -54,9 +54,11 @@ https://maps.googleapis.com/maps/api/geocode/json?address={{address}}&key=MY_API
 http://geoservices.tamu.edu/Services/Geocode/WebService/GeocoderWebServiceHttpNonParsed_V04_01.aspx?apiKey=MY_API_KEY&version=4.01&streetAddress={{address}}&city={{city}}&state={{state}}
 ```
 
-Before making any requests, csvgeocode checks that every `{{column}}` in the URL is a column in your CSV (names are case-sensitive), so a typo can't quietly geocode partial addresses. CSVs saved by Excel as "CSV UTF-8" are handled too: the invisible marker at the start of the file is ignored when matching column names and kept in the output file.
+Before making any requests, csvgeocode checks that every `{{column}}` in the URL is a column in your CSV (names are case-sensitive), so a typo can't quietly geocode partial addresses. It also refuses to run if your CSV has two columns with the same name, since only one of them could ever be kept. CSVs saved by Excel as "CSV UTF-8" are handled too: the invisible marker at the start of the file is ignored when matching column names and kept in the output file.
 
 If several rows end up with the same URL (the same address), it's only requested once, and the other rows reuse the result, whether that was a match or a permanent failure like `NO MATCH`. Temporary failures (e.g. a timeout) aren't reused, so a later row with the same address tries again.
+
+If every `{{column}}` the URL template uses is blank for a row, csvgeocode doesn't bother making a request for it: that row's status is `NO ADDRESS` (see `--status-columns`) and it's counted as a failure, the same as any other row that didn't get a lat/lng.
 
 If your addresses are broken up into multiple columns (e.g. a street_address column, a city column, and a state column), you can use them all together in a URL template:
 
@@ -71,7 +73,7 @@ What handler function to process the API response with.  Current built-in handle
 **Only `google` is maintained.** `mapbox`, `osm` and `tamu` are unchanged from the original project (last updated in 2016) and haven't been tested against their live services since, so they may not work as-is. Known concerns:
 
 * **Mapbox:** the example URL below uses Mapbox's old v4 geocoding endpoint; Mapbox has since moved to newer API versions, whose responses may not match what the handler expects.
-* **OSM Nominatim:** its [usage policy](https://operations.osmfoundation.org/policies/nominatim/) requires an identifying User-Agent and at most 1 request per second. csvgeocode only sends Node's generic `node` User-Agent, and you'd need `--delay 1000`.
+* **OSM Nominatim:** its [usage policy](https://operations.osmfoundation.org/policies/nominatim/) requires an identifying User-Agent and at most 1 request per second. csvgeocode identifies itself (`csvgeocode/<version> (+https://github.com/Element-Creative/csvgeocode)`), but you still need `--delay 1000`.
 * **Texas A&M:** the example URL uses plain `http`, and the API version in it may be outdated.
 
 If you rely on one of these, test it on a few rows first.
@@ -142,7 +144,7 @@ Round the resulting lat/lng to this many decimal places. This removes floating-p
 
 Add three columns to the output, after `lat` and `lng`:
 
-* `geocode_status`: `SUCCESS`, or why the row failed, e.g. `NO MATCH`. Failures that might work if tried again later start with `TEMPORARY ERROR:`, e.g. `TEMPORARY ERROR: Timed out after 30 seconds`. It's blank for rows that already had a lat/lng in the input.
+* `geocode_status`: `SUCCESS`, or why the row failed, e.g. `NO MATCH` or `NO ADDRESS` (every `{{column}}` the URL uses was blank, so nothing was requested). Failures that might work if tried again later start with `TEMPORARY ERROR:`, e.g. `TEMPORARY ERROR: Timed out after 30 seconds`. It's blank for rows that already had a lat/lng in the input.
 * `geocode_location_type`: how precise the match is (Google only). `ROOFTOP` is an exact address; `RANGE_INTERPOLATED` is estimated between two points on the street; `GEOMETRIC_CENTER` is the center of something like a street or area; `APPROXIMATE` is only approximate, e.g. a ZIP code or city center.
 * `geocode_partial_match`: `true` if Google couldn't match the whole address and returned its best guess (Google only). Worth checking by hand, along with anything that isn't `ROOFTOP`.
 
@@ -167,7 +169,7 @@ The output file has to come from the same input: if the row count or any input c
 
 #### `--verbose`
 
-See extra output while csvgeocode is running.
+See extra output while csvgeocode is running. (The summary at the end, on stderr, is printed on every run, with or without `--verbose`.)
 
 Each row gets one line: its status, then the row as it's written to the output. `SUCCESS` is an exact match; a less precise one says how, e.g. `SUCCESS (APPROXIMATE, partial match)` (Google only; see `--status-columns`). Failures that might work on another try start with `TEMPORARY ERROR:`.
 
@@ -181,6 +183,16 @@ Rows geocoded: 2
 Rows failed: 1
 Time elapsed: 1.8 seconds
 ```
+
+If a row already had a lat/lng (in the input, or from a resumed run) it doesn't count as "geocoded", and a `Rows skipped (already had a lat/lng, or done in a previous run): N` line is added between `Rows failed` and `Time elapsed` (only when there is at least one).
+
+#### Progress
+
+Without `--verbose`, if you're writing to an output file (not stdout) and stderr is an interactive terminal, csvgeocode shows a single updating line while it runs, like `Processed 1,234 of 50,000 rows` (every row handled so far, whether it was geocoded, failed, or skipped). It's skipped when stderr isn't a terminal (e.g. piped to a log file), so it never shows up in scripted or logged runs.
+
+#### `--version`
+
+Print the installed version number and exit.
 
 ## Using as a Node module
 
@@ -206,7 +218,26 @@ csvgeocode("path/to/input.csv","path/to/output.csv",{
   });
 ```
 
-You can add all the same options in a script, except for `verbose`.
+You can add all the same options in a script, except for `verbose`, which is CLI-only:
+
+| Module option     | CLI flag            | Default |
+| ------------------ | -------------------- | ------- |
+| `url`               | `--url`               | (required) |
+| `handler`           | `--handler`           | `"google"` |
+| `lat`               | `--lat`               | automatic detection |
+| `lng`               | `--lng`               | automatic detection |
+| `delay`             | `--delay`             | `250` |
+| `timeout`           | `--timeout`           | `30000` |
+| `retries`           | `--retries`           | `3` |
+| `retryWaits`        | *(not exposed on the CLI)* | `[2000, 10000, 30000]` (ms to wait before each retry; the last one repeats if there are more retries than waits) |
+| `maxFailedInARow`   | *(not exposed on the CLI)* | `5` (stop the run after this many consecutive temporary failures; `0` disables) |
+| `force`             | `--force`             | `false` |
+| `resume`            | `--resume`            | `false` |
+| `precision`         | `--precision`         | `6` |
+| `statusColumns`     | `--status-columns`    | `false` |
+| `saveEvery`         | `--save-every`        | `100` |
+
+For example:
 
 ```js
 const options = {
@@ -249,7 +280,13 @@ csvgeocode("input.csv",options)
   });
 ```
 
-`complete` is triggered when all geocoding is done.  It passes a `summary` object with three properties: `failures`, `successes`, and `time`.
+`complete` is triggered when all geocoding is done.  It passes a `summary` object:
+
+* `successes`: rows that have a valid lat/lng at the end of the run, whether that's because they were geocoded now, they already had one in the input, or a resumed run had already done them.
+* `failures`: rows that don't (`results.length - successes`).
+* `geocoded`: rows actually geocoded during *this* run — `successes` minus the ones that were skipped.
+* `skipped`: rows that needed no geocoding at all: they already had a lat/lng in the input, or were already done in a resumed run's output (whether that was a success or a permanent failure like `NO MATCH`).
+* `time`: milliseconds elapsed.
 
 ```js
 csvgeocode("input.csv",options)
@@ -258,7 +295,9 @@ csvgeocode("input.csv",options)
       `summary` is an object like:
       {
         failures: 1, //1 row failed
-        successes: 49, //49 rows succeeded
+        successes: 49, //49 rows have a lat/lng now
+        geocoded: 40, //40 of those were geocoded this run
+        skipped: 9, //9 rows needed no geocoding (already had a lat/lng, or were resumed)
         time: 8700 //it took 8.7 seconds
       }
     */
@@ -307,12 +346,6 @@ The tests run offline: they start a fake geocoding API on localhost and run the 
 * [file-geocoder](https://www.npmjs.com/package/file-geocoder)
 * [Texas A & M Batch Geocoder](http://geoservices.tamu.edu/Services/Geocode/BatchProcess/)
 * [batchgeo](https://en.batchgeo.com/)
-
-## To Do
-
-* Add the NYC geocoder as a built-in handler.
-* Support a CSV with no header row where `lat` and `lng` are numerical indices instead of column names.
-* Support both POST and GET requests somehow.
 
 ## Credits/License
 

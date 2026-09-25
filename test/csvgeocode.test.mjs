@@ -8,6 +8,7 @@ import path from "node:path";
 import {
   ROOT, startServer, runCli, tempDir, closedPort, writeFixture, read, rowsOf, waitFor, rawLat, rawLng, rounded
 } from "./helpers.mjs";
+import * as misc from "../src/misc.js";
 
 let server, dir;
 
@@ -162,6 +163,59 @@ describe("geocoding", () => {
     assert.deepEqual(fs.readdirSync(dir).sort(), ["in.csv", "out.csv"]);
   });
 
+  it("treats a response with no usable lat/lng as a failure, not NaN,NaN", async () => {
+    writeFixture(dir, "in.csv", 0, ["A,badcoords 1"]);
+    const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose", "--status-columns"]);
+    assert.equal(code, 0);
+    const out = read(path.join(dir, "out.csv"));
+    assert.match(out, /^A,badcoords 1,,,/m, "lat and lng should be blank, not NaN");
+    assert.match(out, /Invalid return value from handler for response body:/);
+    assert.match(stderr, /^Invalid return value from handler for response body: /m);
+    assert.match(stderr, /Rows geocoded: 0\nRows failed: 1/);
+  });
+
+  it("skips a row whose template columns are all blank, without making a request", async () => {
+    fs.writeFileSync(path.join(dir, "in.csv"), "NAME,ADDRESS\nA,\nB,  \nC,addr 3\n");
+    const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose", "--status-columns"]);
+    assert.equal(code, 0);
+    assert.deepEqual(server.requests.map(r => r.address), ["addr 3"]);
+    assert.equal(stderr.match(/^NO ADDRESS \| /gm).length, 2);
+    const { rows } = rowsOf(path.join(dir, "out.csv"));
+    assert.deepEqual(rows[0], ["A", "", "", "", "NO ADDRESS", "", ""]);
+    assert.deepEqual(rows[1], ["B", "  ", "", "", "NO ADDRESS", "", ""]);
+  });
+
+  it("writes just the header for an input with no data rows, streamed to stdout", async () => {
+    writeFixture(dir, "in.csv", 0);
+    const { code, stdout } = await cli(["in.csv"]);
+    assert.equal(code, 0);
+    assert.equal(stdout, "NAME,ADDRESS,lat,lng");
+    assert.equal(server.requests.length, 0);
+  });
+
+  it("writes just the header to an output file for an input with no data rows", async () => {
+    writeFixture(dir, "in.csv", 0);
+    const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose", "--status-columns"]);
+    assert.equal(code, 0);
+    assert.equal(read(path.join(dir, "out.csv")), "NAME,ADDRESS,lat,lng,geocode_status,geocode_location_type,geocode_partial_match");
+    assert.match(stderr, /Rows geocoded: 0\nRows failed: 0/);
+  });
+
+  it("URL-encodes template tags in the path with %20, not +, but uses + in the query string", async () => {
+    writeFixture(dir, "in.csv", 0, ["A,two words"]);
+    const origin = new URL(server.url()).origin;
+    const url = origin + "/json/{{ADDRESS}}?address={{ADDRESS}}&key=TESTKEY";
+    await runCli(["in.csv", "out.csv", "--delay", "0", "--url", url], { cwd: dir });
+    assert.equal(server.requests[0].url, "/json/two%20words?address=two+words&key=TESTKEY");
+  });
+
+  it("sends an identifying User-Agent header with every request", async () => {
+    writeFixture(dir, "in.csv", 1);
+    await cli(["in.csv", "out.csv"]);
+    const pkg = JSON.parse(read(path.join(ROOT, "package.json")));
+    assert.equal(server.requests[0].userAgent, "csvgeocode/" + pkg.version + " (+https://github.com/Element-Creative/csvgeocode)");
+  });
+
 });
 
 describe("input checks", () => {
@@ -192,6 +246,15 @@ describe("input checks", () => {
     fs.writeFileSync(path.join(dir, "in.csv"), "ADDRESS,CITY\naddr 1,Dallas\n");
     const { stderr } = await cli(["in.csv", "out.csv"], { template: "{{address}}" });
     assert.match(stderr, /^The URL uses \{\{address\}\}, but in\.csv has no column with that name\. Did you mean \{\{ADDRESS\}\}\? Its columns are: ADDRESS, CITY$/m);
+  });
+
+  it("refuses a CSV with a duplicate column name", async () => {
+    fs.writeFileSync(path.join(dir, "in.csv"), "ADDRESS,NOTE,NOTE\naddr 1,x,y\n");
+    const { code, stderr } = await cli(["in.csv", "out.csv"]);
+    assert.equal(code, 1);
+    assert.match(stderr, /^in\.csv has more than one column named "NOTE"\. Rename or remove the duplicates first, since only one of them can be kept\.$/m);
+    assert.equal(server.requests.length, 0);
+    assert.deepEqual(fs.readdirSync(dir), ["in.csv"]);
   });
 
 });
@@ -312,7 +375,7 @@ describe("--verbose", () => {
 
   it("prints one 'STATUS | row' line per row, progress saves, and a summary", async () => {
     writeFixture(dir, "in.csv", 3, ["X,nomatch"]);
-    const { stderr } = await cli(["in.csv", "out.csv", "--verbose", "--save-every", "2", "--handler", "google"]);
+    const { stderr } = await cli(["in.csv", "out.csv", "--verbose", "--save-every", "2"]);
     const lines = stderr.trim().split("\n");
     assert.deepEqual(lines.slice(0, 6), [
       "SUCCESS | Place 1,addr 1," + rounded(rawLat(1)) + "," + rounded(rawLng(1)),
@@ -328,13 +391,31 @@ describe("--verbose", () => {
     assert.match(lines[8], /^Time elapsed: [\d.]+ seconds$/);
   });
 
+  it("adds a 'Rows skipped' line, and excludes skipped rows from 'Rows geocoded', for rows that already had coordinates", async () => {
+    fs.writeFileSync(path.join(dir, "in.csv"), "ADDRESS,lat,lng\naddr 1,10,20\naddr 2,,\n");
+    const { stderr } = await cli(["in.csv", "out.csv", "--verbose"]);
+    assert.match(stderr, /Rows geocoded: 1\nRows failed: 0\nRows skipped \(already had a lat\/lng, or done in a previous run\): 1\nTime elapsed: [\d.]+ seconds/);
+  });
+
+  it("prints the summary even without --verbose, and nothing else", async () => {
+    writeFixture(dir, "in.csv", 2, ["X,nomatch"]);
+    const { stderr } = await cli(["in.csv", "out.csv"]);
+    assert.match(stderr, /^Rows geocoded: 2\nRows failed: 1\nTime elapsed: [\d.]+ seconds\n$/);
+  });
+
+  it("omits the 'Rows skipped' line when nothing was skipped", async () => {
+    writeFixture(dir, "in.csv", 1);
+    const { stderr } = await cli(["in.csv", "out.csv", "--verbose"]);
+    assert.doesNotMatch(stderr, /Rows skipped/);
+  });
+
 });
 
 describe("--verbose statuses", () => {
 
   it("notes imprecise matches and temporary failures in the status", async () => {
     writeFixture(dir, "in.csv", 1, ["B,partial 2", "C,nomatch", "D,http500"]);
-    const { stderr } = await cli(["in.csv", "out.csv", "--verbose", "--retries", "0", "--handler", "google"]);
+    const { stderr } = await cli(["in.csv", "out.csv", "--verbose", "--retries", "0"]);
     assert.deepEqual(stderr.split("\n").slice(0, 4).map(line => line.split(" | ")[0]), [
       "SUCCESS",
       "SUCCESS (APPROXIMATE, partial match)",
@@ -345,7 +426,7 @@ describe("--verbose statuses", () => {
 
   it("ends each line with the output row, including status columns", async () => {
     writeFixture(dir, "in.csv", 0, ["B,partial 2"]);
-    const { stderr } = await cli(["in.csv", "out.csv", "--verbose", "--status-columns", "--handler", "google"]);
+    const { stderr } = await cli(["in.csv", "out.csv", "--verbose", "--status-columns"]);
     assert.equal(stderr.split("\n")[0], "SUCCESS (APPROXIMATE, partial match) | B,partial 2," +
       rounded(rawLat(2)) + "," + rounded(rawLng(2)) + ",SUCCESS,APPROXIMATE,true");
   });
@@ -369,11 +450,12 @@ describe("interrupting and resuming", () => {
   it("saves every row on Ctrl-C, with blanks for rows not reached", async () => {
     const { code, stderr } = await interrupted(40);
     assert.equal(code, 130);
-    assert.match(stderr, /Interrupted\. Saved \d+ of 40 rows to out\.csv/);
+    const saved = Number(stderr.match(/Interrupted\. Saved (\d+) of 40 rows to out\.csv/)[1]);
     assert.doesNotMatch(stderr, /Saved progress/);
     const { header, rows } = rowsOf(path.join(dir, "out.csv"));
     assert.equal(header, "NAME,ADDRESS,lat,lng");
     assert.equal(rows.length, 40);
+    assert.equal(rows.filter(r => r[2]).length, saved, "the message should count exactly the rows that were saved with a lat/lng");
     assert.ok(rows[0][2], "first row geocoded");
     assert.equal(rows[39][2], "", "last row not reached");
   });
@@ -403,6 +485,17 @@ describe("interrupting and resuming", () => {
     });
     const done = rowsOf(path.join(dir, "out.csv")).rows.filter(r => r[2]).length;
     assert.ok(done >= 6 && done % 3 === 0, "expected a multiple of 3 rows saved, got " + done);
+  });
+
+  it("exits 143 on SIGTERM (130 on SIGINT, tested above)", async () => {
+    writeFixture(dir, "in.csv", 40);
+    const { code } = await cli(["in.csv", "out.csv", "--delay", "30"], {
+      onSpawn: async child => {
+        await waitFor(() => server.requests.length >= 5);
+        child.kill("SIGTERM");
+      }
+    });
+    assert.equal(code, 143);
   });
 
   it("--resume with no output file yet starts from the beginning", async () => {
@@ -495,8 +588,23 @@ describe("command-line checks", () => {
   it("shows help when there's no input file", async () => {
     const result = await runCli(["--url", "x"], { cwd: dir });
     assert.equal(result.code, 0);
-    assert.match(result.stderr, /Usage:/);
-    assert.match(result.stderr, /--resume/);
+    assert.match(result.stdout, /Usage:/);
+    assert.match(result.stdout, /--resume/);
+  });
+
+  it("--help prints usage to stdout and exits 0", async () => {
+    const result = await runCli(["--help"], { cwd: dir });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /Usage:/);
+    assert.equal(result.stderr, "");
+  });
+
+  it("--version prints the installed version to stdout and exits 0", async () => {
+    const pkg = JSON.parse(read(path.join(ROOT, "package.json")));
+    const result = await runCli(["--version"], { cwd: dir });
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout.trim(), pkg.version);
+    assert.equal(result.stderr, "");
   });
 
 });
@@ -525,8 +633,19 @@ describe("Node module API", () => {
     assert.equal(rows[0].row.lat, Number(rounded(rawLat(1))));
     assert.equal(summary.successes, 2);
     assert.equal(summary.failures, 1);
+    assert.equal(summary.geocoded, 2);
+    assert.equal(summary.skipped, 0);
     assert.ok(summary.time >= 0);
     assert.deepEqual(fs.readdirSync(dir), ["in.csv"], "test mode writes nothing");
+  });
+
+  it("counts rows that already had coordinates as skipped, not geocoded", async () => {
+    const input = path.join(dir, "in.csv");
+    fs.writeFileSync(input, "NAME,ADDRESS,lat,lng\nA,addr 1,10,20\nB,addr 2,,\n");
+    const { summary } = await run(input, { test: true });
+    assert.equal(summary.successes, 2);
+    assert.equal(summary.geocoded, 1);
+    assert.equal(summary.skipped, 1);
   });
 
   it("passes match details or a temporary flag as the row event's third argument", async () => {
@@ -585,6 +704,38 @@ describe("Node module API", () => {
   it("throws right away without a url or with an unknown handler", () => {
     assert.throws(() => geocode("in.csv", { test: true }), /url/i);
     assert.throws(() => geocode("in.csv", { test: true, url: "x", handler: "nope" }), /invalid value/i);
+  });
+
+});
+
+describe("misc helpers", () => {
+
+  it("isNumeric accepts finite numbers and plain decimal strings within the limit", () => {
+    assert.equal(misc.isNumeric(45), true);
+    assert.equal(misc.isNumeric("45"), true);
+    assert.equal(misc.isNumeric("-96.683712"), true);
+    assert.equal(misc.isNumeric(" 12 "), true);
+    assert.equal(misc.isNumeric("1e2", 200), true);
+    assert.equal(misc.isNumeric(0), true);
+  });
+
+  it("isNumeric rejects non-numbers, hex strings, out-of-range values, and infinities", () => {
+    assert.equal(misc.isNumeric("0x10"), false);
+    assert.equal(misc.isNumeric(""), false);
+    assert.equal(misc.isNumeric("abc"), false);
+    assert.equal(misc.isNumeric(NaN), false);
+    assert.equal(misc.isNumeric(Infinity), false);
+    assert.equal(misc.isNumeric([1]), false);
+    assert.equal(misc.isNumeric(null), false);
+    assert.equal(misc.isNumeric(undefined), false);
+    assert.equal(misc.isNumeric(91, 90), false);
+    assert.equal(misc.isNumeric(-91, 90), false);
+    assert.equal(misc.isNumeric(90, 90), true);
+  });
+
+  it("progressLine formats done/total with thousands separators", () => {
+    assert.equal(misc.progressLine(1234, 50000), "Processed 1,234 of 50,000 rows");
+    assert.equal(misc.progressLine(0, 0), "Processed 0 of 0 rows");
   });
 
 });

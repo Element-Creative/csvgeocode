@@ -6,6 +6,11 @@ import * as csv from "./csv.js";
 import defaults from "./defaults.js";
 import handlers from "./handlers.js";
 
+//Identify csvgeocode to the API it's talking to, e.g. so Nominatim's usage
+//policy (which requires an identifying User-Agent) is satisfied
+const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url))),
+      USER_AGENT = "csvgeocode/" + pkg.version + " (+https://github.com/Element-Creative/csvgeocode)";
+
 //geocode(input, [output], options)
 export default function generate(input, output, options) {
 
@@ -66,9 +71,11 @@ class Geocoder extends EventEmitter {
           _this = this;
 
     let rows = null, //All parsed rows, filled in as they're geocoded
+        outputColumns = null, //Column order for the output file (input columns, plus lat/lng and status columns)
         done = 0, //Number of rows processed so far
         unsaved = 0, //Number of rows geocoded since the last save
-        failedInARow = 0; //Consecutive rows that failed with temporary errors
+        failedInARow = 0, //Consecutive rows that failed with temporary errors
+        skippedRows = new Set(); //Rows that needed no geocoding: already had coordinates, or were resumed
 
     this.options = options;
     this.saveProgress = saveProgress;
@@ -100,6 +107,7 @@ class Geocoder extends EventEmitter {
       }
 
       rows = parsed;
+      _this.total = rows.length;
 
       if (previous) {
 
@@ -113,11 +121,16 @@ class Geocoder extends EventEmitter {
 
       }
 
+      outputColumns = buildOutputColumns(parsed.columns);
+
       try {
 
         for (const row of rows) {
           const skipped = needsNoGeocoding(row);
-          await codeRow(row);
+          if (skipped) {
+            skippedRows.add(row);
+          }
+          const requested = await codeRow(row);
           done++;
           if (!skipped && options.saveEvery > 0 && ++unsaved >= options.saveEvery && done < rows.length) {
             saveProgress();
@@ -126,6 +139,11 @@ class Geocoder extends EventEmitter {
           //the API is probably down, so stop rather than fail every row
           if (options.maxFailedInARow > 0 && failedInARow >= options.maxFailedInARow) {
             throw new StopError("Stopping: the last " + failedInARow + " rows all failed with temporary errors, even after retrying. Check your network connection and the API's status.");
+          }
+          //Pace the requests. This comes after done++ so a Ctrl-C during the
+          //wait reports the row that was just finished as done.
+          if (requested && done < rows.length) {
+            await sleep(options.delay);
           }
         }
 
@@ -141,9 +159,35 @@ class Geocoder extends EventEmitter {
 
     }
 
-    async function codeRow(row) {
+    //The output file's columns, in order: the input's columns, then lat/lng
+    //(unless already one of the input columns), then status columns if enabled.
+    //Passed explicitly to d3-dsv so a header-only input (no data rows) still
+    //writes its header, instead of an empty file.
+    function buildOutputColumns(columns) {
 
-      const url = fillTemplate(options.url, row);
+      const result = columns.slice();
+
+      for (const column of [options.lat, options.lng]) {
+        if (!result.includes(column)) {
+          result.push(column);
+        }
+      }
+
+      if (options.statusColumns) {
+        for (const column of STATUS_COLUMNS) {
+          if (!result.includes(column)) {
+            result.push(column);
+          }
+        }
+      }
+
+      return result;
+
+    }
+
+    //Geocode one row. Resolves to true if it made a request to the API (so
+    //the caller should wait the delay before the next row).
+    async function codeRow(row) {
 
       //Doesn't need geocoding
       if (needsNoGeocoding(row)) {
@@ -151,8 +195,17 @@ class Geocoder extends EventEmitter {
         if (!resumed.has(row)) {
           _this.emit("row", null, row);
         }
-        return;
+        return false;
       }
+
+      //Every {{column}} the URL template uses is empty: don't bother making
+      //a request for an address that isn't there
+      if (isBlankAddress(row)) {
+        record(row, { message: "NO ADDRESS" });
+        return false;
+      }
+
+      const url = fillTemplate(options.url, row);
 
       //Same address as an earlier row: reuse its result or permanent failure
       const cached = cache[url],
@@ -160,10 +213,15 @@ class Geocoder extends EventEmitter {
 
       record(row, outcome);
 
-      if (!cached) {
-        await sleep(options.delay);
-      }
+      return !cached;
 
+    }
+
+    //True if every {{column}} the URL template uses is empty or whitespace
+    //for this row (and there's at least one such column)
+    function isBlankAddress(row) {
+      const columns = templateColumns(options.url);
+      return columns.length > 0 && columns.every(column => !String(row[column] ?? "").trim());
     }
 
     //Request a URL, retrying temporary problems. Stops the run on a fatal one.
@@ -227,7 +285,10 @@ class Geocoder extends EventEmitter {
       let response, body, result;
 
       try {
-        response = await fetch(url, { signal: AbortSignal.timeout(options.timeout) });
+        response = await fetch(url, {
+          signal: AbortSignal.timeout(options.timeout),
+          headers: { "User-Agent": USER_AGENT }
+        });
         body = await response.text();
       } catch (e) {
         return { message: describeError(e), retry: true };
@@ -268,8 +329,9 @@ class Geocoder extends EventEmitter {
         return { message: result.fatal, fatal: true };
       }
 
-      //Success
-      if (result && "lat" in result && "lng" in result) {
+      //Success: lat/lng have to be real, in-range coordinates, not e.g. NaN
+      //from a Google response with an empty geometry.location
+      if (result && misc.isNumeric(result.lat, 90) && misc.isNumeric(result.lng, 180)) {
 
         //Round off floating-point noise (e.g. -96.68371259999999)
         const round = options.precision !== null && options.precision !== false;
@@ -307,12 +369,21 @@ class Geocoder extends EventEmitter {
 
     async function complete(results) {
 
+      //successes: rows that have a valid lat/lng at the end, whether they were
+      //geocoded now or already had one (in the input, or a resumed output)
+      //skipped: rows that needed no geocoding this run, for either reason
+      //geocoded: successes that were actually geocoded during this run
       const numSuccesses = results.filter(successful).length,
             numFailures = results.length - numSuccesses,
+            numSkipped = skippedRows.size,
+            numSkippedSuccesses = results.filter(row => skippedRows.has(row) && successful(row)).length,
+            numGeocoded = numSuccesses - numSkippedSuccesses,
             summarize = function() {
               _this.emit("complete", {
                 failures: numFailures,
                 successes: numSuccesses,
+                geocoded: numGeocoded,
+                skipped: numSkipped,
                 time: Date.now() - time
               });
             };
@@ -320,10 +391,10 @@ class Geocoder extends EventEmitter {
       if (options.test) {
         summarize();
       } else if (typeof output === "string") {
-        await csv.write(output, results);
+        await csv.write(output, results, outputColumns);
         summarize();
       } else {
-        process.stdout.write(csv.stringify(results), summarize);
+        process.stdout.write(csv.stringify(results, outputColumns), summarize);
       }
 
     }
@@ -391,7 +462,7 @@ class Geocoder extends EventEmitter {
         return null;
       }
 
-      csv.writeSync(output, rows);
+      csv.writeSync(output, rows, outputColumns);
       unsaved = 0;
 
       const progress = { done: done, total: rows.length };
@@ -407,8 +478,16 @@ class Geocoder extends EventEmitter {
     }
 
     //Make sure every {{column}} in the URL template is a real column, so a
-    //typo doesn't quietly geocode (and pay for) partial addresses
+    //typo doesn't quietly geocode (and pay for) partial addresses. Also
+    //refuses a CSV with a duplicate column name, since only one of them
+    //could ever be kept.
     function checkTemplate(columns) {
+
+      const duplicate = firstDuplicate(columns);
+      if (duplicate) {
+        throw new Error(input + " has more than one column named \"" + duplicate +
+          "\". Rename or remove the duplicates first, since only one of them can be kept.");
+      }
 
       const missing = templateColumns(options.url).filter(column => !columns.includes(column));
 
@@ -431,12 +510,38 @@ class Geocoder extends EventEmitter {
       return Array.from(template.matchAll(TEMPLATE_TAG), match => match[1]);
     }
 
+    //The first column name that appears more than once, or null
+    function firstDuplicate(columns) {
+      const seen = new Set();
+      for (const column of columns) {
+        if (seen.has(column)) {
+          return column;
+        }
+        seen.add(column);
+      }
+      return null;
+    }
+
     //Fill each {{column}} in the URL template with that column's value,
-    //URL-encoded (spaces as +). Unknown columns become empty.
+    //URL-encoded. In the query string (after the first ?), spaces become +,
+    //which only means a space there; in the path, they stay %20. Unknown
+    //columns become empty.
     function fillTemplate(template, row) {
-      return template.replace(TEMPLATE_TAG, function(tag, column) {
-        return column in row ? encodeURIComponent(row[column]).replace(/%20/g, "+") : "";
+
+      const fill = (part, useQueryEncoding) => part.replace(TEMPLATE_TAG, function(tag, column) {
+        if (!(column in row)) {
+          return "";
+        }
+        const encoded = encodeURIComponent(row[column]);
+        return useQueryEncoding ? encoded.replace(/%20/g, "+") : encoded;
       });
+
+      const q = template.indexOf("?");
+
+      return q === -1 ?
+        fill(template, false) :
+        fill(template.slice(0, q), false) + fill(template.slice(q), true);
+
     }
 
   }

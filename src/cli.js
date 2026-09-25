@@ -3,6 +3,9 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import geocode from "./csvgeocode.js";
 import { stringifyRow } from "./csv.js";
+import * as misc from "./misc.js";
+
+const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url)));
 
 const usage = `Usage: csvgeocode [options] [input CSV] [output CSV]
 
@@ -22,7 +25,8 @@ Options:
   --resume          Continue an interrupted run: rows already geocoded in the output file are kept and skipped
   --overwrite       Replace the output file if it already exists
   --force           Re-geocode every row, even input rows that already have a lat/lng. (To replace an existing output file, use --overwrite.) Can't be resumed
-  --verbose         Show some information while csvgeocode is running
+  --verbose         Show a status line for every row while csvgeocode is running (the summary at the end is always shown)
+  --version         Show the installed version number
   --help            Show this message`;
 
 //Print a problem with the arguments and exit
@@ -52,6 +56,7 @@ try {
       overwrite: { type: "boolean" },
       force: { type: "boolean" },
       verbose: { type: "boolean" },
+      version: { type: "boolean" },
       help: { type: "boolean", short: "h" }
     }
   }));
@@ -59,8 +64,13 @@ try {
   fail(e.message);
 }
 
+if (args.version) {
+  console.log(pkg.version);
+  process.exit(0);
+}
+
 if (args.help || !files.length) {
-  console.error(usage);
+  console.log(usage);
   process.exit(0);
 }
 
@@ -113,10 +123,6 @@ if ("save-every" in args && !/^\d+$/.test(args["save-every"])) {
   fail("--save-every requires a whole number of rows.");
 }
 
-if (!args.handler) {
-  console.warn("No handler specified, defaulting to Google");
-}
-
 const [input, output] = files,
       options = { url: args.url };
 
@@ -138,7 +144,25 @@ if ("save-every" in args) options.saveEvery = Number(args["save-every"]);
 
 const geocoder = output ? geocode(input, output, options) : geocode(input, options);
 
+//A one-line progress indicator, rewritten in place with \r, for an
+//interactive terminal that isn't already getting a line per row from
+//--verbose
+const showProgress = Boolean(output) && process.stderr.isTTY && !args.verbose;
+let progressShown = false, //A progress line is currently on the screen, so the next thing printed needs a fresh line first
+    rowsDone = 0;
+
+//Exit codes matching the conventional 128 + signal number
+const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 };
+
+function endProgress() {
+  if (progressShown) {
+    process.stderr.write("\n");
+    progressShown = false;
+  }
+}
+
 geocoder.on("error", function(err) {
+  endProgress();
   console.error(err.message);
   //The run was stopped partway; progress was saved
   if (err.progress) {
@@ -149,6 +173,8 @@ geocoder.on("error", function(err) {
 
 geocoder.on("resume", function(progress) {
   if (progress.found) {
+    //Start the progress line from the rows a previous run already did
+    rowsDone = progress.done + (progress.failed || 0);
     console.warn("Resuming: " + progress.done + " of " + progress.total + " rows already geocoded in " + output +
       (progress.failed ? ", and skipping " + progress.failed + " that failed permanently (see geocode_status)" : ""));
   } else {
@@ -159,12 +185,22 @@ geocoder.on("resume", function(progress) {
 //On Ctrl-C or kill, save whatever has been geocoded so far before exiting
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, function() {
-    const progress = geocoder.saveProgress({ quiet: true });
+    const progress = geocoder.saveProgress({ quiet: true }),
+          newline = progressShown ? "" : "\n"; //Move past the echoed ^C, unless endProgress already did
+    endProgress();
     if (progress) {
-      console.warn("\nInterrupted. Saved " + progress.done + " of " + progress.total + " rows to " + output);
+      console.warn(newline + "Interrupted. Saved " + progress.done + " of " + progress.total + " rows to " + output);
     }
-    process.exit(130);
+    process.exit(SIGNAL_EXIT_CODES[signal]);
   });
+}
+
+if (showProgress) {
+  geocoder.on("row", function() {
+    rowsDone++;
+    process.stderr.write("\r" + misc.progressLine(rowsDone, geocoder.total || rowsDone));
+    progressShown = true;
+  }).on("complete", endProgress);
 }
 
 if (args.verbose) {
@@ -177,14 +213,20 @@ if (args.verbose) {
     })
     .on("progress", function(progress) {
       console.warn("Saved progress: " + progress.done + " of " + progress.total + " rows");
-    })
-    .on("complete", function(summary) {
-      console.warn("\nRows geocoded: " + summary.successes + "\n" +
-                  "Rows failed: " + summary.failures + "\n" +
-                  "Time elapsed: " + (Math.round(summary.time / 100) / 10) + " seconds");
     });
 
 }
+
+//The end-of-run summary always goes to stderr, so it never mixes with CSV
+//output on stdout. A blank line first separates it from --verbose's row lines.
+geocoder.on("complete", function(summary) {
+  const lines = ["Rows geocoded: " + summary.geocoded, "Rows failed: " + summary.failures];
+  if (summary.skipped > 0) {
+    lines.push("Rows skipped (already had a lat/lng, or done in a previous run): " + summary.skipped);
+  }
+  lines.push("Time elapsed: " + (Math.round(summary.time / 100) / 10) + " seconds");
+  console.warn((args.verbose ? "\n" : "") + lines.join("\n"));
+});
 
 //The status at the start of a --verbose row line: "SUCCESS" for an exact
 //match, "SUCCESS (APPROXIMATE, partial match)" for a less precise one,

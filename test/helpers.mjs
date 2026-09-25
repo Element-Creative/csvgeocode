@@ -36,6 +36,7 @@ export function rounded(raw, places = 6) {
 //   "overlimit..." -> OVER_QUERY_LIMIT the first time, then OK
 //   "flaky..."    -> HTTP 503 twice, then OK
 //   "hang..."     -> never responds
+//   "badcoords..." -> OK, but with an empty geometry.location (no lat/lng)
 // Every request is recorded in `requests` (address + key query params).
 export async function startServer() {
   const requests = [];
@@ -49,7 +50,7 @@ export async function startServer() {
     const url = new URL(req.url, "http://localhost");
     const address = url.searchParams.get("address") ?? "";
     const key = url.searchParams.get("key");
-    requests.push({ url: req.url, address, key, time: Date.now() });
+    requests.push({ url: req.url, address, key, userAgent: req.headers["user-agent"], time: Date.now() });
 
     const count = (seen.get(address) ?? 0) + 1;
     seen.set(address, count);
@@ -77,6 +78,9 @@ export async function startServer() {
     }
     if (address.startsWith("denied")) {
       return json({ status: "REQUEST_DENIED", error_message: "The provided API key is invalid.", results: [] });
+    }
+    if (address.startsWith("badcoords")) {
+      return json({ status: "OK", results: [{ geometry: { location: {} }, location_type: "ROOFTOP" }] });
     }
     if (address.startsWith("overlimit") && count === 1) {
       return json({ status: "OVER_QUERY_LIMIT", error_message: "Slow down.", results: [] });
