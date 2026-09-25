@@ -76,7 +76,7 @@ describe("geocoding", () => {
     const start = Date.now();
     const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose", "--timeout", "300", "--retries", "0"]);
     assert.equal(code, 0);
-    assert.match(stderr, /^Timed out after 0\.3 seconds \| A,hang,,$/m);
+    assert.match(stderr, /^TEMPORARY ERROR: Timed out after 0\.3 seconds \| A,hang,,$/m);
     assert.match(stderr, /^SUCCESS \| B,addr 2,/m);
     assert.ok(Date.now() - start < 10000);
   });
@@ -86,7 +86,7 @@ describe("geocoding", () => {
     const url = "http://127.0.0.1:" + (await closedPort()) + "/?a={{ADDRESS}}";
     const { code, stderr } = await runCli(["in.csv", "out.csv", "--verbose", "--delay", "0", "--retries", "0", "--url", url], { cwd: dir });
     assert.equal(code, 0);
-    assert.match(stderr, /^Network error: .*ECONNREFUSED.* \| Place 1,addr 1,,$/m);
+    assert.match(stderr, /^TEMPORARY ERROR: Network error: .*ECONNREFUSED.* \| Place 1,addr 1,,$/m);
   });
 
   it("detects existing latitude/longitude columns and fills them in place", async () => {
@@ -144,8 +144,8 @@ describe("geocoding", () => {
     assert.match(out, /^B,garbage,,$/m);
     assert.match(out, /^D,addr 4,32\./m);
     assert.match(stderr, /^NO MATCH \| A,nomatch/m);
-    assert.match(stderr, /^Parsing error: .* \| B,garbage,,$/m);
-    assert.match(stderr, /^HTTP Status 500 \| C,http500,,$/m);
+    assert.match(stderr, /^TEMPORARY ERROR: Parsing error: .* \| B,garbage,,$/m);
+    assert.match(stderr, /^TEMPORARY ERROR: HTTP Status 500 \| C,http500,,$/m);
     assert.match(stderr, /Rows geocoded: 1\nRows failed: 3/);
   });
 
@@ -330,6 +330,28 @@ describe("--verbose", () => {
 
 });
 
+describe("--verbose statuses", () => {
+
+  it("notes imprecise matches and temporary failures in the status", async () => {
+    writeFixture(dir, "in.csv", 1, ["B,partial 2", "C,nomatch", "D,http500"]);
+    const { stderr } = await cli(["in.csv", "out.csv", "--verbose", "--retries", "0", "--handler", "google"]);
+    assert.deepEqual(stderr.split("\n").slice(0, 4).map(line => line.split(" | ")[0]), [
+      "SUCCESS",
+      "SUCCESS (APPROXIMATE, partial match)",
+      "NO MATCH",
+      "TEMPORARY ERROR: HTTP Status 500"
+    ]);
+  });
+
+  it("ends each line with the output row, including status columns", async () => {
+    writeFixture(dir, "in.csv", 0, ["B,partial 2"]);
+    const { stderr } = await cli(["in.csv", "out.csv", "--verbose", "--status-columns", "--handler", "google"]);
+    assert.equal(stderr.split("\n")[0], "SUCCESS (APPROXIMATE, partial match) | B,partial 2," +
+      rounded(rawLat(2)) + "," + rounded(rawLng(2)) + ",SUCCESS,APPROXIMATE,true");
+  });
+
+});
+
 describe("interrupting and resuming", () => {
 
   // Start a slow run, Ctrl-C it after a few requests, and return the result.
@@ -505,6 +527,21 @@ describe("Node module API", () => {
     assert.equal(summary.failures, 1);
     assert.ok(summary.time >= 0);
     assert.deepEqual(fs.readdirSync(dir), ["in.csv"], "test mode writes nothing");
+  });
+
+  it("passes match details or a temporary flag as the row event's third argument", async () => {
+    const input = writeFixture(dir, "in.csv", 0, ["A,partial 1", "B,nomatch", "C,http500"]);
+    const details = await new Promise(resolve => {
+      const all = [];
+      geocode(input, { delay: 0, url: server.url(), test: true, retries: 0 })
+        .on("row", (err, row, detail) => all.push(detail))
+        .on("complete", () => resolve(all));
+    });
+    assert.deepEqual(details, [
+      { locationType: "APPROXIMATE", partialMatch: true },
+      { temporary: false },
+      { temporary: true }
+    ]);
   });
 
   it("accepts a custom handler function", async () => {

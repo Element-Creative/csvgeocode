@@ -169,10 +169,12 @@ The output file has to come from the same input: if the row count or any input c
 
 See extra output while csvgeocode is running.
 
+Each row gets one line: its status, then the row as it's written to the output. `SUCCESS` is an exact match; a less precise one says how, e.g. `SUCCESS (APPROXIMATE, partial match)` (Google only; see `--status-columns`). Failures that might work on another try start with `TEMPORARY ERROR:`.
+
 ```
 $ csvgeocode input.csv --url "MY_API_URL" --verbose
 SUCCESS | 160 Varick St,New York,NY
-SUCCESS | 1600 Pennsylvania Ave,Washington,DC
+SUCCESS (APPROXIMATE, partial match) | 1600 Pennsylvania Ave,Washington,DC
 NO MATCH | 123 Fictional St,Noncity,XY
 
 Rows geocoded: 2
@@ -225,7 +227,7 @@ csvgeocode("input.csv","output.csv",options);
 
 `csvgeocode` runs asynchronously, but you can listen for events. The main ones are `row` and `complete`; there's also `error` (a problem that stops the run, like an unreadable input file or a bad API key: if nothing listens for it, it's thrown), `retry` (before each retry of a failed request), `progress` (each time progress is saved) and `resume` (when `resume: true` picks up a previous run).
 
-`row` is triggered when each row is processed. It passes a string error message if geocoding the row failed, and the row itself.
+`row` is triggered when each row is processed. It passes a string error message if geocoding the row failed, the row itself, and details: `{ locationType, partialMatch }` for a match (when the handler provides them), or `{ temporary: true }` for a failure that might work on another try. Rows that already had a lat/lng get no details.
 
 ```js
 csvgeocode("input.csv",options)

@@ -210,7 +210,12 @@ class Geocoder extends EventEmitter {
         row[PARTIAL_MATCH] = result && typeof result.partialMatch === "boolean" ? String(result.partialMatch) : "";
       }
 
-      _this.emit("row", result ? null : outcome.message, row);
+      //Third argument: how precise a match is, or whether a failure is temporary
+      const details = result ?
+        { locationType: result.locationType, partialMatch: result.partialMatch } :
+        { temporary: Boolean(outcome.retry) };
+
+      _this.emit("row", result ? null : outcome.message, row, details);
 
     }
 

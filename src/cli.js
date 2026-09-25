@@ -169,8 +169,8 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 
 if (args.verbose) {
 
-  geocoder.on("row", function(err, row) {
-      console.warn((err || "SUCCESS") + " | " + stringifyRow(row));
+  geocoder.on("row", function(err, row, details) {
+      console.warn(rowStatus(err, details) + " | " + stringifyRow(row));
     })
     .on("retry", function(retry, row) {
       console.warn("Retrying in " + (retry.wait / 1000) + " seconds after " + retry.error + " | " + stringifyRow(row));
@@ -183,5 +183,28 @@ if (args.verbose) {
                   "Rows failed: " + summary.failures + "\n" +
                   "Time elapsed: " + (Math.round(summary.time / 100) / 10) + " seconds");
     });
+
+}
+
+//The status at the start of a --verbose row line: "SUCCESS" for an exact
+//match, "SUCCESS (APPROXIMATE, partial match)" for a less precise one,
+//"TEMPORARY ERROR: ..." for a failure that might work on another try
+function rowStatus(err, details = {}) {
+
+  if (err) {
+    return (details.temporary ? "TEMPORARY ERROR: " : "") + err;
+  }
+
+  const notes = [];
+
+  if (details.locationType && details.locationType !== "ROOFTOP") {
+    notes.push(details.locationType);
+  }
+
+  if (details.partialMatch) {
+    notes.push("partial match");
+  }
+
+  return "SUCCESS" + (notes.length ? " (" + notes.join(", ") + ")" : "");
 
 }
