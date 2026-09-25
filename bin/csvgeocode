@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 var path = require("path"),
+    fs = require("fs"),
     csv = require("dsv")(","),
     yargs = require("yargs")
     .usage("Usage: geocode [options] [input CSV] [output CSV]")
@@ -11,10 +12,13 @@ var path = require("path"),
     .describe("delay","Milliseconds to wait between API calls. Default: 250")
     .describe("force","Re-geocode every row even if a lat/lng already exists")
     .describe("precision","Decimal places to round lat/lng to. Default: 6")
+    .describe("overwrite","Replace the output file if it already exists")
+    .describe("resume","Continue an interrupted run: rows already geocoded in the output file are kept and skipped")
+    .describe("save-every","Save progress to the output file every N rows, so an interrupted run can be resumed. 0 disables. Default: 100")
     .describe("verbose","Show some information while csvgeocode is running")
     .describe("handler","What API handler to use.  Current built-in options are 'mapbox', 'google', and 'tamu'.  Default: 'google'")
     .describe("help","Show this message")
-    .boolean(["force","verbose","help"])
+    .boolean(["force","overwrite","resume","verbose","help"])
     .string(["_","lat","lng","url","handler"])
     .check(function(argv) {
 
@@ -25,6 +29,35 @@ var path = require("path"),
 
       if ("precision" in argv && !/^\d+$/.test(argv.precision)) {
         throw new Error("--precision requires a whole number of decimal places.");
+      }
+
+      if (argv.resume && argv._.length < 2) {
+        throw new Error("--resume requires an output file.");
+      }
+
+      if (argv.resume && argv.force) {
+        throw new Error("--resume and --force can't be used together.");
+      }
+
+      if (argv.resume && argv.overwrite) {
+        throw new Error("--resume and --overwrite can't be used together.");
+      }
+
+      if (argv._.length > 1) {
+
+        if (path.resolve(argv._[0]) === path.resolve(argv._[1])) {
+          throw new Error("The output file can't be the same as the input file.");
+        }
+
+        //Don't clobber a previous (possibly partial) run by accident
+        if (fs.existsSync(argv._[1]) && !argv.resume && !argv.overwrite) {
+          throw new Error(argv._[1] + " already exists. Add --resume to continue that run, or --overwrite to replace it.");
+        }
+
+      }
+
+      if ("save-every" in argv && !/^\d+$/.test(argv["save-every"])) {
+        throw new Error("--save-every requires a whole number of rows.");
       }
 
       return true;
@@ -45,7 +78,7 @@ if (!args.handler) {
 
 for (var key in args) {
   if (args[key] !== undefined) {
-    options[key] = key === "precision" ? Number(args[key]) : args[key];
+    options[key] = ["precision","save-every","saveEvery"].indexOf(key) > -1 ? Number(args[key]) : args[key];
   }
 }
 
@@ -59,11 +92,37 @@ if (args._.length > 1) {
   geocoder = geocode(args._[0],options);
 }
 
+geocoder.on("error",function(err){
+  console.error(err.message);
+  process.exit(1);
+});
+
+geocoder.on("resume",function(progress){
+  if (progress.found) {
+    console.warn("Resuming: "+progress.done+" of "+progress.total+" rows already geocoded in "+args._[1]);
+  } else {
+    console.warn("Nothing to resume: "+args._[1]+" doesn't exist yet. Starting from the beginning.");
+  }
+});
+
+//On Ctrl-C or kill, save whatever has been geocoded so far before exiting
+["SIGINT","SIGTERM"].forEach(function(signal){
+  process.on(signal,function(){
+    var progress = geocoder.saveProgress && geocoder.saveProgress();
+    if (progress) {
+      console.warn("\nInterrupted. Saved "+progress.done+" of "+progress.total+" rows to "+args._[1]);
+    }
+    process.exit(130);
+  });
+});
+
 if (args.verbose) {
 
   geocoder.on("row",function(err,row){
-      console.warn(csv.formatRows([csv.parseRows(csv.format([row]))[1]]));
-      console.warn((err || "SUCCESS")+"\n");
+      console.warn((err || "SUCCESS")+" | "+csv.formatRows([csv.parseRows(csv.format([row]))[1]]));
+    })
+    .on("progress",function(progress){
+      console.warn("Saved progress: "+progress.done+" of "+progress.total+" rows");
     })
     .on("complete",function(summary){
       console.warn("\nRows geocoded: "+summary.successes+"\n"+

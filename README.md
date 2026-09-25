@@ -94,11 +94,32 @@ The number of milliseconds to wait between geocoding calls.  Setting this to 0 i
 
 By default, if a lat/lng is already found in an input row, that will be kept.  If you want to re-geocode every row no matter what and replace any lat/lngs that already exist, add `--force`.  This means you'll hit API limits faster and the process will take longer.
 
+#### `--overwrite`
+
+If the output file already exists, csvgeocode refuses to start so a previous run isn't lost by accident. Add `--overwrite` to replace it, or `--resume` to continue it. The output file also can't be the same as the input file.
+
 #### `--precision [decimal places]`
 
 Round the resulting lat/lng to this many decimal places. This removes floating-point noise like `-96.68371259999999`.
 
 **Default:** 6
+
+#### `--save-every [rows]`
+
+When writing to an output file, save progress to it every this many geocoded rows. Pressing Ctrl-C also saves before exiting. Each save is a complete copy of the input: rows done so far have a lat/lng, and the rest have blanks. Set to 0 to only write at the end.
+
+**Default:** 100
+
+#### `--resume`
+
+Continue an interrupted run. Rerun the same command with `--resume` added: rows that already have a lat/lng in the output file are kept and skipped, and geocoding picks up from there. Rows that failed before (e.g. `NO MATCH`) are tried again.
+
+```
+$ csvgeocode input.csv output.csv --url "MY_API_URL"            # interrupted partway
+$ csvgeocode input.csv output.csv --url "MY_API_URL" --resume   # picks up where it stopped
+```
+
+The output file has to come from the same input: if the row count or any input column differs, csvgeocode stops with an error instead of mixing up rows. If the output file doesn't exist yet, `--resume` just starts from the beginning. Can't be combined with `--force` or `--overwrite`.
 
 #### `--verbose`
 
@@ -106,14 +127,9 @@ See extra output while csvgeocode is running.
 
 ```
 $ csvgeocode input.csv --url "MY_API_URL" --verbose
-160 Varick St,New York,NY
-SUCCESS
-
-1600 Pennsylvania Ave,Washington,DC
-SUCCESS
-
-123 Fictional St,Noncity,XY
-NO MATCH
+SUCCESS | 160 Varick St,New York,NY
+SUCCESS | 1600 Pennsylvania Ave,Washington,DC
+NO MATCH | 123 Fictional St,Noncity,XY
 
 Rows geocoded: 2
 Rows failed: 1

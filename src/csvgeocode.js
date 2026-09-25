@@ -65,16 +65,35 @@ util.inherits(Geocoder, EventEmitter);
 Geocoder.prototype.run = function(input,output,options) {
 
   var cache = {}, //Cached results by address
+      rows = null, //All parsed rows, filled in as they're geocoded
+      done = 0, //Number of rows processed so far
+      unsaved = 0, //Number of rows geocoded since the last save
+      resumed = new Set(), //Rows whose lat/lng came from a previous run's output
       _this = this,
       time = (new Date()).getTime();
 
   this.options = options;
+  this.saveProgress = saveProgress;
 
-  csv.read(input,csvParsed);
+  csv.read(input,function(parsed){
+
+    //Pick up where a previous run left off, if its output exists
+    if (options.resume && typeof output === "string" && fs.existsSync(output)) {
+      csv.read(output,function(previous){
+        csvParsed(parsed,previous);
+      });
+    } else {
+      if (options.resume) {
+        _this.emit("resume",{ found: false, done: 0, total: parsed.length });
+      }
+      csvParsed(parsed);
+    }
+
+  });
 
   return this;
 
-  function csvParsed(parsed) {
+  function csvParsed(parsed,previous) {
 
     var q = queue(1);
 
@@ -86,8 +105,28 @@ Geocoder.prototype.run = function(input,output,options) {
 
     }
 
+    rows = parsed;
+
+    if (previous) {
+      try {
+        resumeFrom(previous);
+      } catch (e) {
+        return _this.emit("error",e);
+      }
+      _this.emit("resume",{ found: true, done: resumed.size, total: parsed.length });
+    }
+
     parsed.forEach(function(row){
-      q.defer(codeRow,row);
+      q.defer(function(cb){
+        var skipped = needsNoGeocoding(row);
+        codeRow(row,function(err,result){
+          done++;
+          if (!skipped && options.saveEvery > 0 && ++unsaved >= options.saveEvery && done < parsed.length) {
+            saveProgress();
+          }
+          cb(err,result);
+        });
+      });
     });
 
     q.awaitAll(complete);
@@ -99,8 +138,11 @@ Geocoder.prototype.run = function(input,output,options) {
     var url = render(options.url,escape(row));
 
     //Doesn't need geocoding
-    if (!options.force && misc.isNumeric(row[options.lat]) && misc.isNumeric(row[options.lng])) {
-      _this.emit("row",null,row);
+    if (needsNoGeocoding(row)) {
+      //Rows finished in a previous run aren't reported again
+      if (!resumed.has(row)) {
+        _this.emit("row",null,row);
+      }
       return cb(null,row);
     }
 
@@ -146,7 +188,7 @@ Geocoder.prototype.run = function(input,output,options) {
     try {
       result = options.handler(body);
     } catch (e) {
-      _this.emit("row","Parsing error: "+e.toString(),row);
+      result = "Parsing error: "+e.toString();
     }
 
     //Error code
@@ -158,7 +200,7 @@ Geocoder.prototype.run = function(input,output,options) {
       _this.emit("row",result,row);
 
     //Success
-    } else if ("lat" in result && "lng" in result) {
+    } else if (result && "lat" in result && "lng" in result) {
 
       //Round off floating-point noise (e.g. -96.68371259999999)
       if (options.precision !== null && options.precision !== false) {
@@ -226,6 +268,53 @@ Geocoder.prototype.run = function(input,output,options) {
     } else {
       summarize();
     }
+
+  }
+
+  function needsNoGeocoding(row) {
+    return !options.force && misc.isNumeric(row[options.lat]) && misc.isNumeric(row[options.lng]);
+  }
+
+  //Copy lat/lngs from a previous run's output onto the input rows, after
+  //checking that the output really came from this same input
+  function resumeFrom(previous) {
+
+    if (previous.length !== rows.length) {
+      throw new Error("Can't resume: " + output + " has " + previous.length + " rows but " + input + " has " + rows.length + ".");
+    }
+
+    rows.forEach(function(row,i){
+
+      for (var key in row) {
+        if (key !== options.lat && key !== options.lng && row[key] !== previous[i][key]) {
+          throw new Error("Can't resume: row " + (i + 1) + " of " + output + " doesn't match " + input + " (column \"" + key + "\").");
+        }
+      }
+
+      if (misc.isNumeric(previous[i][options.lat]) && misc.isNumeric(previous[i][options.lng])) {
+        row[options.lat] = previous[i][options.lat];
+        row[options.lng] = previous[i][options.lng];
+        resumed.add(row);
+      }
+
+    });
+
+  }
+
+  //Write every row so far (geocoded ones plus the untouched remainder) to the
+  //output file, so an interrupted run can resume by using it as the input
+  function saveProgress() {
+
+    if (!rows || typeof output !== "string" || options.test) {
+      return null;
+    }
+
+    csv.writeSync(output,rows);
+    unsaved = 0;
+
+    var progress = { done: done, total: rows.length };
+    _this.emit("progress",progress);
+    return progress;
 
   }
 
