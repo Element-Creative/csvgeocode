@@ -94,6 +94,8 @@ The number of milliseconds to wait between geocoding calls.  Setting this to 0 i
 
 By default, if a lat/lng is already found in an input row, that will be kept.  If you want to re-geocode every row no matter what and replace any lat/lngs that already exist, add `--force`.  This means you'll hit API limits faster and the process will take longer.
 
+`--force` is about the rows in your *input*, not the output file: to replace an existing output file, use `--overwrite` (the two can be combined). A `--force` run can't be continued with `--resume`, since there's no way to tell which rows of the saved file were re-geocoded; if one is interrupted, start it over with `--overwrite`.
+
 #### `--overwrite`
 
 If the output file already exists, csvgeocode refuses to start so a previous run isn't lost by accident. Add `--overwrite` to replace it, or `--resume` to continue it. The output file also can't be the same as the input file.

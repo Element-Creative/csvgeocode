@@ -10,7 +10,7 @@ var path = require("path"),
     .describe("lat","Latitude column name. Default: automatic detection")
     .describe("lng","Longitude column name. Default: automatic detection")
     .describe("delay","Milliseconds to wait between API calls. Default: 250")
-    .describe("force","Re-geocode every row even if a lat/lng already exists")
+    .describe("force","Re-geocode every row, even input rows that already have a lat/lng. (To replace an existing output file, use --overwrite.) Can't be resumed")
     .describe("precision","Decimal places to round lat/lng to. Default: 6")
     .describe("overwrite","Replace the output file if it already exists")
     .describe("resume","Continue an interrupted run: rows already geocoded in the output file are kept and skipped")
@@ -36,7 +36,7 @@ var path = require("path"),
       }
 
       if (argv.resume && argv.force) {
-        throw new Error("--resume and --force can't be used together.");
+        throw new Error("--resume and --force can't be used together: a --force run re-geocodes every row, so there's no way to tell which rows in the output are already done.");
       }
 
       if (argv.resume && argv.overwrite) {
