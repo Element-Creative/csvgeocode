@@ -1,39 +1,27 @@
-var fs = require("fs"),
-    csv = require("dsv")(",");
+import fs from "node:fs";
+import { csvParse, csvFormat, csvFormatBody } from "d3-dsv";
 
-module.exports = {
-  read: function(filename,cb) {
-    fs.readFile(filename,"utf8",function(err,raw){
+export async function read(filename) {
+  return csvParse(await fs.promises.readFile(filename, "utf8"));
+}
 
-      if (err) {
-        throw new Error(err);
-      }
+//Write to a temp file and rename it into place, so a crash or kill
+//mid-write never leaves a truncated output file behind
+export async function write(filename, rows) {
+  const tmp = filename + ".tmp";
+  await fs.promises.writeFile(tmp, csvFormat(rows));
+  await fs.promises.rename(tmp, filename);
+}
 
-      cb(csv.parse(raw));
+export function writeSync(filename, rows) {
+  const tmp = filename + ".tmp";
+  fs.writeFileSync(tmp, csvFormat(rows));
+  fs.renameSync(tmp, filename);
+}
 
-    });
-  },
-  //Write to a temp file and rename it into place, so a crash or kill
-  //mid-write never leaves a truncated output file behind
-  write: function(filename,rows,cb) {
-    var tmp = filename + ".tmp";
-    fs.writeFile(tmp,csv.format(rows),function(err){
-      if (err) {
-        throw new Error(err);
-      };
-      fs.rename(tmp,filename,function(err){
-        if (err) {
-          throw new Error(err);
-        }
-        cb();
-      });
-    });
-  },
-  writeSync: function(filename,rows) {
-    var tmp = filename + ".tmp";
-    fs.writeFileSync(tmp,csv.format(rows));
-    fs.renameSync(tmp,filename);
-  },
-  parse: csv.parse,
-  stringify: csv.format
-};
+export { csvFormat as stringify };
+
+//One row as a CSV line, without the header
+export function stringifyRow(row) {
+  return csvFormatBody([row]);
+}

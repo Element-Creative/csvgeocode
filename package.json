@@ -1,34 +1,38 @@
 {
   "name": "csvgeocode",
-  "version": "2.3.1",
+  "version": "3.0.0",
   "description": "Bulk geocode addresses in a CSV.",
+  "type": "module",
   "main": "index.js",
-  "directories": {
-    "test": "test"
+  "exports": "./index.js",
+  "engines": {
+    "node": ">=20"
   },
   "scripts": {
     "test": "node --test --test-reporter=spec test/csvgeocode.test.mjs"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/veltman/csvgeocode.git"
+    "url": "https://github.com/Element-Creative/csvgeocode.git"
   },
-  "keywords": ["geocode", "geocoding", "address", "csv"],
+  "keywords": [
+    "geocode",
+    "geocoding",
+    "address",
+    "csv"
+  ],
   "bin": {
     "csvgeocode": "./bin/csvgeocode"
   },
   "author": "Noah Veltman (@veltman)",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/veltman/csvgeocode/issues"
+    "url": "https://github.com/Element-Creative/csvgeocode/issues"
   },
-  "homepage": "https://github.com/veltman/csvgeocode",
+  "homepage": "https://github.com/Element-Creative/csvgeocode",
   "dependencies": {
-    "dsv": "0.0.4",
-    "extend": "^2.0.0",
+    "d3-dsv": "^3.0.1",
     "mustache": "^2.2.1",
-    "queue-async": "^1.0.7",
-    "request": "^2.53.0",
-    "yargs": "^3.0.4"
+    "request": "^2.53.0"
   }
 }

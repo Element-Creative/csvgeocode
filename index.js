@@ -1,1 +1,1 @@
-module.exports = require("./src/csvgeocode");
+export { default } from "./src/csvgeocode.js";

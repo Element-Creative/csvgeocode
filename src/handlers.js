@@ -1,6 +1,6 @@
-var csv = require("dsv")(",");
+import { csvParseRows, csvFormatRows } from "d3-dsv";
 
-module.exports = {
+export default {
   google: function(body) {
 
     var response = JSON.parse(body);
@@ -35,22 +35,6 @@ module.exports = {
     };
 
   },
-  mapzen: function(body) {
-
-    var response = JSON.parse(body);
-
-    if (response.features === undefined) {
-      return response.message;
-    } else if (!response.features.length) {
-      return "NO MATCH";
-    }
-
-    return {
-      lat: response.features[0].geometry.coordinates[1],
-      lng: response.features[0].geometry.coordinates[0]
-    };
-
-  },
   tamu: function(body) {
 
     var parsed;
@@ -60,13 +44,13 @@ module.exports = {
     }
 
     try {
-      parsed = csv.parseRows(body);
+      parsed = csvParseRows(body);
     } catch(e) {
       return "ERROR PARSING RESPONSE: "+body;
     }
 
     if (parsed[0].length < 5) {
-      return "UNEXPECTED RESPONSE FORMAT FROM TAMU GEOCODER: "+csv.formatRows([parsed[0]]);
+      return "UNEXPECTED RESPONSE FORMAT FROM TAMU GEOCODER: "+csvFormatRows([parsed[0]]);
     }
 
     if (!parsed.length || +parsed[0][2] !== 200 || !+parsed[0][3] || !+parsed[0][4]) {

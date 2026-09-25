@@ -130,7 +130,7 @@ describe("--verbose", () => {
       "SUCCESS | Place 3,addr 3," + rounded(rawLat(3)) + "," + rounded(rawLng(3)),
       "NO MATCH | X,nomatch,,",
       ""
-    ].map((line, i) => i === 4 && lines[4] === "NO MATCH | X,nomatch," ? lines[4] : line)); // dsv 0.0.4 drops the trailing empty field
+    ]);
 
     assert.match(lines[6], /^Rows geocoded: 3$/);
     assert.match(lines[7], /^Rows failed: 1$/);
@@ -253,6 +253,21 @@ describe("command-line checks", () => {
       assert.equal(server.requests.length, 0);
     });
   }
+
+  it("rejects unknown options instead of ignoring them", async () => {
+    writeFixture(dir, "in.csv", 1);
+    const result = await cli(["in.csv", "out.csv", "--verbos"]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /Unknown option '--verbos'/);
+    assert.equal(server.requests.length, 0);
+  });
+
+  it("reports a missing input file without a stack trace", async () => {
+    const result = await cli(["missing.csv", "out.csv"]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /ENOENT: no such file or directory, open 'missing\.csv'/);
+    assert.doesNotMatch(result.stderr, /\n\s+at /);
+  });
 
   it("requires --url", async () => {
     writeFixture(dir, "in.csv", 1);

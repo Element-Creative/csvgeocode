@@ -1,36 +1,23 @@
-var misc = require("./misc"),
-    defaults = require("./defaults"),
-    handlers = require("./handlers"),
-    fs = require("fs"),
-    request = require("request"),
-    queue = require("queue-async"),
-    extend = require("extend"),
-    util = require("util"),
-    render = require("mustache").render,
-    csv = require("./csv"),
-    EventEmitter = require("events").EventEmitter;
+import fs from "node:fs";
+import { EventEmitter } from "node:events";
+import request from "request";
+import mustache from "mustache";
+import * as misc from "./misc.js";
+import * as csv from "./csv.js";
+import defaults from "./defaults.js";
+import handlers from "./handlers.js";
 
-module.exports = generate;
+//geocode(input, [output], options)
+export default function generate(input, output, options) {
 
-function generate(inFile,outFile,userOptions) {
-
-  var input = inFile,
-      output = null,
-      options = {};
-
-  if (arguments.length === 2) {
-    if (typeof outFile === "string") {
-      output = outFile;
-    } else {
-      options = outFile;
-    }
-  } else if (arguments.length === 3) {
-    output = outFile;
-    options = userOptions;
+  //No output file: geocode(input, options) streams to stdout
+  if (arguments.length === 2 && typeof output !== "string") {
+    options = output;
+    output = null;
   }
 
   //Extend default options
-  options = extend({},defaults,options);
+  options = { ...defaults, ...options };
 
   if (typeof options.handler === "string") {
     options.handler = options.handler.toLowerCase();
@@ -51,286 +38,248 @@ function generate(inFile,outFile,userOptions) {
     throw new Error("'url' parameter is required.");
   }
 
-  var geocoder = new Geocoder();
+  return new Geocoder().run(input, output || null, options);
 
-  return geocoder.run(input,output,options);
+}
 
-};
+class Geocoder extends EventEmitter {
 
-var Geocoder = function() {
-};
+  run(input, output, options) {
 
-util.inherits(Geocoder, EventEmitter);
+    const cache = {}, //Cached results by address
+          resumed = new Set(), //Rows whose lat/lng came from a previous run's output
+          time = Date.now(),
+          _this = this;
 
-Geocoder.prototype.run = function(input,output,options) {
+    let rows = null, //All parsed rows, filled in as they're geocoded
+        done = 0, //Number of rows processed so far
+        unsaved = 0; //Number of rows geocoded since the last save
 
-  var cache = {}, //Cached results by address
-      rows = null, //All parsed rows, filled in as they're geocoded
-      done = 0, //Number of rows processed so far
-      unsaved = 0, //Number of rows geocoded since the last save
-      resumed = new Set(), //Rows whose lat/lng came from a previous run's output
-      _this = this,
-      time = (new Date()).getTime();
+    this.options = options;
+    this.saveProgress = saveProgress;
 
-  this.options = options;
-  this.saveProgress = saveProgress;
+    start().catch(err => _this.emit("error", err));
 
-  csv.read(input,function(parsed){
+    return this;
 
-    //Pick up where a previous run left off, if its output exists
-    if (options.resume && typeof output === "string" && fs.existsSync(output)) {
-      csv.read(output,function(previous){
-        csvParsed(parsed,previous);
-      });
-    } else {
-      if (options.resume) {
-        _this.emit("resume",{ found: false, done: 0, total: parsed.length });
+    async function start() {
+
+      const parsed = await csv.read(input);
+      let previous = null;
+
+      //Pick up where a previous run left off, if its output exists
+      if (options.resume && typeof output === "string") {
+        if (fs.existsSync(output)) {
+          previous = await csv.read(output);
+        } else {
+          _this.emit("resume", { found: false, done: 0, total: parsed.length });
+        }
       }
-      csvParsed(parsed);
-    }
 
-  });
+      //If there are unset column names,
+      //try to discover them on the first data row
+      if (options.lat === null || options.lng === null) {
+        options = misc.discoverOptions(options, parsed[0]);
+      }
 
-  return this;
+      rows = parsed;
 
-  function csvParsed(parsed,previous) {
-
-    var q = queue(1);
-
-    //If there are unset column names,
-    //try to discover them on the first data row
-    if (options.lat === null || options.lng === null) {
-
-      options = misc.discoverOptions(options,parsed[0]);
-
-    }
-
-    rows = parsed;
-
-    if (previous) {
-      try {
+      if (previous) {
         resumeFrom(previous);
-      } catch (e) {
-        return _this.emit("error",e);
+        _this.emit("resume", { found: true, done: resumed.size, total: parsed.length });
       }
-      _this.emit("resume",{ found: true, done: resumed.size, total: parsed.length });
+
+      for (const row of rows) {
+        const skipped = needsNoGeocoding(row);
+        await new Promise(resolve => codeRow(row, resolve));
+        done++;
+        if (!skipped && options.saveEvery > 0 && ++unsaved >= options.saveEvery && done < rows.length) {
+          saveProgress();
+        }
+      }
+
+      await complete(rows);
+
     }
 
-    parsed.forEach(function(row){
-      q.defer(function(cb){
-        var skipped = needsNoGeocoding(row);
-        codeRow(row,function(err,result){
-          done++;
-          if (!skipped && options.saveEvery > 0 && ++unsaved >= options.saveEvery && done < parsed.length) {
-            saveProgress();
-          }
-          cb(err,result);
-        });
+    function codeRow(row, cb) {
+
+      const url = mustache.render(options.url, escape(row));
+
+      //Doesn't need geocoding
+      if (needsNoGeocoding(row)) {
+        //Rows finished in a previous run aren't reported again
+        if (!resumed.has(row)) {
+          _this.emit("row", null, row);
+        }
+        return cb();
+      }
+
+      //Address is cached from a previous result
+      if (cache[url]) {
+
+        row[options.lat] = cache[url].lat;
+        row[options.lng] = cache[url].lng;
+
+        _this.emit("row", null, row);
+        return cb();
+
+      }
+
+      request.get(url, function(err, response, body) {
+
+        //Some other error
+        if (err) {
+
+          _this.emit("row", err.toString(), row);
+          return cb();
+
+        } else if (response.statusCode !== 200) {
+
+          _this.emit("row", "HTTP Status " + response.statusCode, row);
+          return cb();
+
+        } else {
+
+          handleResponse(body, row, url, cb);
+
+        }
+
       });
-    });
-
-    q.awaitAll(complete);
-
-  }
-
-  function codeRow(row,cb) {
-
-    var url = render(options.url,escape(row));
-
-    //Doesn't need geocoding
-    if (needsNoGeocoding(row)) {
-      //Rows finished in a previous run aren't reported again
-      if (!resumed.has(row)) {
-        _this.emit("row",null,row);
-      }
-      return cb(null,row);
-    }
-
-    //Address is cached from a previous result
-    if (cache[url]) {
-
-      row[options.lat] = cache[url].lat;
-      row[options.lng] = cache[url].lng;
-
-      _this.emit("row",null,row);
-      return cb(null,row);
 
     }
 
-    request.get(url,function(err,response,body) {
-    
-      //Some other error
-      if (err) {
+    function handleResponse(body, row, url, cb) {
 
-        _this.emit("row",err.toString(),row);
-        return cb(null,row);
+      let result;
 
-      } else if (response.statusCode !== 200) {
-
-        _this.emit("row","HTTP Status "+response.statusCode,row);
-        return cb(null,row);
-
-      } else {
-
-        handleResponse(body,row,url,cb);
-
+      try {
+        result = options.handler(body);
+      } catch (e) {
+        result = "Parsing error: " + e.toString();
       }
 
-    });
+      //Error code
+      if (typeof result === "string") {
 
-  }
+        row[options.lat] = "";
+        row[options.lng] = "";
 
+        _this.emit("row", result, row);
 
-  function handleResponse(body,row,url,cb) {
+      //Success
+      } else if (result && "lat" in result && "lng" in result) {
 
-    var result;
-
-    try {
-      result = options.handler(body);
-    } catch (e) {
-      result = "Parsing error: "+e.toString();
-    }
-
-    //Error code
-    if (typeof result === "string") {
-
-      row[options.lat] = "";
-      row[options.lng] = "";
-
-      _this.emit("row",result,row);
-
-    //Success
-    } else if (result && "lat" in result && "lng" in result) {
-
-      //Round off floating-point noise (e.g. -96.68371259999999)
-      if (options.precision !== null && options.precision !== false) {
-        result = {
-          lat: misc.round(result.lat,options.precision),
-          lng: misc.round(result.lng,options.precision)
-        };
-      }
-
-      row[options.lat] = result.lat;
-      row[options.lng] = result.lng;
-
-      //Cache the result
-      cache[url] = result;
-      _this.emit("row",null,row);
-
-    //Unknown extraction error
-    } else {
-
-      _this.emit("row","Invalid return value from handler for response body: "+body,row);
-
-    }
-
-    return setTimeout(function(){
-      cb(null,row);
-    },options.delay);
-
-  }
-
-
-  function complete(e,results) {
-
-    var numSuccesses = results.filter(successful).length,
-        numFailures = results.length - numSuccesses,
-        summarize = function(){
-          _this.emit("complete",{
-            failures: numFailures,
-            successes: numSuccesses,
-            time: (new Date()).getTime() - time
-          });
-        };
-
-    if (!options.test) {
-
-      if (typeof output === "string") {
-
-        csv.write(output,results,summarize);
-
-      } else {
-
-        output = output || process.stdout;
-
-        try {
-
-          output.write(csv.stringify(results),summarize);
-
-        } catch(e) {
-
-          throw new TypeError("Second argument output needs to be a filename or a writeable stream.");
-
+        //Round off floating-point noise (e.g. -96.68371259999999)
+        if (options.precision !== null && options.precision !== false) {
+          result = {
+            lat: misc.round(result.lat, options.precision),
+            lng: misc.round(result.lng, options.precision)
+          };
         }
 
+        row[options.lat] = result.lat;
+        row[options.lng] = result.lng;
+
+        //Cache the result
+        cache[url] = result;
+        _this.emit("row", null, row);
+
+      //Unknown extraction error
+      } else {
+
+        _this.emit("row", "Invalid return value from handler for response body: " + body, row);
+
       }
 
-    } else {
-      summarize();
+      setTimeout(cb, options.delay);
+
     }
 
-  }
+    async function complete(results) {
 
-  function needsNoGeocoding(row) {
-    return !options.force && misc.isNumeric(row[options.lat]) && misc.isNumeric(row[options.lng]);
-  }
+      const numSuccesses = results.filter(successful).length,
+            numFailures = results.length - numSuccesses,
+            summarize = function() {
+              _this.emit("complete", {
+                failures: numFailures,
+                successes: numSuccesses,
+                time: Date.now() - time
+              });
+            };
 
-  //Copy lat/lngs from a previous run's output onto the input rows, after
-  //checking that the output really came from this same input
-  function resumeFrom(previous) {
+      if (options.test) {
+        summarize();
+      } else if (typeof output === "string") {
+        await csv.write(output, results);
+        summarize();
+      } else {
+        process.stdout.write(csv.stringify(results), summarize);
+      }
 
-    if (previous.length !== rows.length) {
-      throw new Error("Can't resume: " + output + " has " + previous.length + " rows but " + input + " has " + rows.length + ".");
     }
 
-    rows.forEach(function(row,i){
+    function needsNoGeocoding(row) {
+      return !options.force && misc.isNumeric(row[options.lat]) && misc.isNumeric(row[options.lng]);
+    }
 
-      for (var key in row) {
-        if (key !== options.lat && key !== options.lng && row[key] !== previous[i][key]) {
-          throw new Error("Can't resume: row " + (i + 1) + " of " + output + " doesn't match " + input + " (column \"" + key + "\").");
+    //Copy lat/lngs from a previous run's output onto the input rows, after
+    //checking that the output really came from this same input
+    function resumeFrom(previous) {
+
+      if (previous.length !== rows.length) {
+        throw new Error("Can't resume: " + output + " has " + previous.length + " rows but " + input + " has " + rows.length + ".");
+      }
+
+      rows.forEach(function(row, i) {
+
+        for (const key in row) {
+          if (key !== options.lat && key !== options.lng && row[key] !== previous[i][key]) {
+            throw new Error("Can't resume: row " + (i + 1) + " of " + output + " doesn't match " + input + " (column \"" + key + "\").");
+          }
         }
-      }
 
-      if (misc.isNumeric(previous[i][options.lat]) && misc.isNumeric(previous[i][options.lng])) {
-        row[options.lat] = previous[i][options.lat];
-        row[options.lng] = previous[i][options.lng];
-        resumed.add(row);
-      }
+        if (misc.isNumeric(previous[i][options.lat]) && misc.isNumeric(previous[i][options.lng])) {
+          row[options.lat] = previous[i][options.lat];
+          row[options.lng] = previous[i][options.lng];
+          resumed.add(row);
+        }
 
-    });
+      });
 
-  }
-
-  //Write every row so far (geocoded ones plus the untouched remainder) to the
-  //output file, so an interrupted run can resume by using it as the input
-  function saveProgress() {
-
-    if (!rows || typeof output !== "string" || options.test) {
-      return null;
     }
 
-    csv.writeSync(output,rows);
-    unsaved = 0;
+    //Write every row so far (geocoded ones plus the untouched remainder) to the
+    //output file, so an interrupted run can resume by using it as the input
+    function saveProgress() {
 
-    var progress = { done: done, total: rows.length };
-    _this.emit("progress",progress);
-    return progress;
+      if (!rows || typeof output !== "string" || options.test) {
+        return null;
+      }
 
-  }
+      csv.writeSync(output, rows);
+      unsaved = 0;
 
-  function successful(row) {
-    return misc.isNumeric(row[options.lat]) && misc.isNumeric(row[options.lng]);
-  }
+      const progress = { done: done, total: rows.length };
+      _this.emit("progress", progress);
+      return progress;
 
-  function escape(row) {
-    var escaped = extend({},row);
-
-    for (var key in escaped) {
-      escaped[key] = encodeURIComponent(escaped[key]).replace(/(%20| )/g,"+").replace(/[&]/g,"%26");
     }
 
-    return escaped;
+    function successful(row) {
+      return misc.isNumeric(row[options.lat]) && misc.isNumeric(row[options.lng]);
+    }
+
+    function escape(row) {
+      const escaped = { ...row };
+
+      for (const key in escaped) {
+        escaped[key] = encodeURIComponent(escaped[key]).replace(/(%20| )/g, "+").replace(/[&]/g, "%26");
+      }
+
+      return escaped;
+    }
+
   }
 
-};
-
+}

@@ -3,17 +3,22 @@ csvgeocode
 
 For when you have a CSV with addresses and you want a lat/lng for every row.  Bulk geocode addresses a CSV with a few lines of code.
 
-The defaults are configured for [Google's geocoder](https://developers.google.com/maps/documentation/geocoding/) but it can be configured to work with any other similar geocoding service.  There are built-in response handlers for [Google](https://developers.google.com/maps/documentation/geocoding/), [Mapbox](https://www.mapbox.com/developers/api/geocoding/), [OSM Nominatim](http://nominatim.openstreetmap.org/), [Mapzen](https://mapzen.com/projects/search), and [Texas A & M's](http://geoservices.tamu.edu/Services/Geocode/WebService/) geocoders (details below).
+The defaults are configured for [Google's geocoder](https://developers.google.com/maps/documentation/geocoding/) but it can be configured to work with any other similar geocoding service.  There are built-in response handlers for [Google](https://developers.google.com/maps/documentation/geocoding/), [Mapbox](https://www.mapbox.com/developers/api/geocoding/), [OSM Nominatim](http://nominatim.openstreetmap.org/), and [Texas A & M's](http://geoservices.tamu.edu/Services/Geocode/WebService/) geocoders (details below).
 
 Make sure that you use this in compliance with the relevant API's terms of service.
 
 ## Basic command line usage
 
-Install globally via npm:
+Requires Node 20 or newer. This is the [Element-Creative fork](https://github.com/Element-Creative/csvgeocode); the `csvgeocode` package on npm is the original 2.x version without these changes. Install from GitHub:
 
 ```
-npm install -g csvgeocode
+git clone https://github.com/Element-Creative/csvgeocode.git
+cd csvgeocode
+npm ci
+ln -s "$PWD/bin/csvgeocode" /usr/local/bin/csvgeocode
 ```
+
+The `ln -s` puts it on your `PATH` for every Node version (it runs with whichever `node` is active); it may need `sudo`.
 
 Use it:
 
@@ -47,8 +52,6 @@ http://api.tiles.mapbox.com/v4/geocode/mapbox.places/{{address}}.json?access_tok
 https://maps.googleapis.com/maps/api/geocode/json?address={{address}}&key=MY_API_KEY
 
 http://geoservices.tamu.edu/Services/Geocode/WebService/GeocoderWebServiceHttpNonParsed_V04_01.aspx?apiKey=MY_API_KEY&version=4.01&streetAddress={{address}}&city={{city}}&state={{state}}
-
-https://search.mapzen.com/v1/search?api_key=MY_API_KEY&text={{address}}
 ```
 
 If your addresses are broken up into multiple columns (e.g. a street_address column, a city column, and a state column), you can use them all together in a URL template:
@@ -59,13 +62,11 @@ https://maps.googleapis.com/maps/api/geocode/json?address={{street_address}},{{c
 
 #### `--handler [handler]`
 
-What handler function to process the API response with.  Current built-in handlers are `"google"`, `"mapbox"`, `"mapzen"`, `"osm"`, and `"tamu"`. Contributions of handlers for other geocoders are welcome! You can define a custom handler when using this as a Node module (see below).
+What handler function to process the API response with.  Current built-in handlers are `"google"`, `"mapbox"`, `"osm"`, and `"tamu"`. Contributions of handlers for other geocoders are welcome! You can define a custom handler when using this as a Node module (see below).
 
 Examples:
 ```
 $ csvgeocode input.csv --url "http://api.tiles.mapbox.com/v4/geocode/mapbox.places/{{MY_ADDRESS_COLUMN_NAME}}.json?access_token=123ABC" --handler mapbox
-
-$ csvgeocode input.csv --url 'https://search.mapzen.com/v1/search?api_key=123ABC&text={{MY_ADDRESS_COLUMN_NAME}}' --handler mapzen
 
 $ csvgeocode input.csv --url "http://geoservices.tamu.edu/Services/Geocode/WebService/GeocoderWebServiceHttpNonParsed_V04_01.aspx?version=4.01&streetAddress={{ADDR}}&city={{CITY}}&state={{STATE}}&apiKey=123ABC" --handler tamu
 ```
@@ -140,16 +141,16 @@ Time elapsed: 1.8 seconds
 
 ## Using as a Node module
 
-Install via `npm`:
+Install from GitHub with `npm`:
 
 ```
-npm install csvgeocode
+npm install github:Element-Creative/csvgeocode
 ```
 
-Use it:
+It's an ES module, so use `import`:
 
 ```js
-var csvgeocode = require("csvgeocode");
+import csvgeocode from "csvgeocode";
 
 //stream to stdout
 csvgeocode("path/to/input.csv",{
@@ -165,7 +166,7 @@ csvgeocode("path/to/input.csv","path/to/output.csv",{
 You can add all the same options in a script, except for `verbose`.
 
 ```js
-var options = {
+const options = {
   "url": "MY_API_URL",
   "lat": "MY_SPECIAL_LATITUDE_COLUMN_NAME",
   "lng": "MY_SPECIAL_LONGITUDE_COLUMN_NAME",
@@ -181,7 +182,7 @@ csvgeocode("input.csv",options);
 csvgeocode("input.csv","output.csv",options);
 ```
 
-`csvgeocode` runs asynchronously, but you can listen for two events: `row` and `complete`.
+`csvgeocode` runs asynchronously, but you can listen for events. The main ones are `row` and `complete`; there's also `error` (a problem that stops the run, like an unreadable input file: if nothing listens for it, it's thrown), `progress` (each time progress is saved) and `resume` (when `resume: true` picks up a previous run).
 
 `row` is triggered when each row is processed. It passes a string error message if geocoding the row failed, and the row itself.
 
@@ -208,7 +209,7 @@ csvgeocode("input.csv",options)
 `complete` is triggered when all geocoding is done.  It passes a `summary` object with three properties: `failures`, `successes`, and `time`.
 
 ```js
-csvgeocoder("input.csv",options)
+csvgeocode("input.csv",options)
   .on("complete",function(summary){
     /*
       `summary` is an object like:
@@ -231,7 +232,7 @@ The handler function is passed the body of an API response and should either ret
 
 ```js
 
-csvgeocoder("input.csv",{
+csvgeocode("input.csv",{
   url: "MY_API_URL",
   handler: customHandler
 });

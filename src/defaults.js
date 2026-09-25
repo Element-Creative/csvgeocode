@@ -1,4 +1,4 @@
-module.exports =  {
+export default {
   lat: null,
   lng: null,
   delay: 250,
