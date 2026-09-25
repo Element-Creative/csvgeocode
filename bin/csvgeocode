@@ -10,6 +10,7 @@ var path = require("path"),
     .describe("lng","Longitude column name. Default: automatic detection")
     .describe("delay","Milliseconds to wait between API calls. Default: 250")
     .describe("force","Re-geocode every row even if a lat/lng already exists")
+    .describe("precision","Decimal places to round lat/lng to. Default: 6")
     .describe("verbose","Show some information while csvgeocode is running")
     .describe("handler","What API handler to use.  Current built-in options are 'mapbox', 'google', and 'tamu'.  Default: 'google'")
     .describe("help","Show this message")
@@ -20,6 +21,10 @@ var path = require("path"),
       if (argv.help) return;
       if ("delay" in argv && isNaN(Number(argv.delay))) {
         throw new Error("--delay requires a numeric value in milliseconds.");
+      }
+
+      if ("precision" in argv && !/^\d+$/.test(argv.precision)) {
+        throw new Error("--precision requires a whole number of decimal places.");
       }
 
       return true;
@@ -40,7 +45,7 @@ if (!args.handler) {
 
 for (var key in args) {
   if (args[key] !== undefined) {
-    options[key] = args[key];
+    options[key] = key === "precision" ? Number(args[key]) : args[key];
   }
 }
 

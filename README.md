@@ -94,6 +94,12 @@ The number of milliseconds to wait between geocoding calls.  Setting this to 0 i
 
 By default, if a lat/lng is already found in an input row, that will be kept.  If you want to re-geocode every row no matter what and replace any lat/lngs that already exist, add `--force`.  This means you'll hit API limits faster and the process will take longer.
 
+#### `--precision [decimal places]`
+
+Round the resulting lat/lng to this many decimal places. This removes floating-point noise like `-96.68371259999999`.
+
+**Default:** 6
+
 #### `--verbose`
 
 See extra output while csvgeocode is running.

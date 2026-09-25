@@ -160,6 +160,14 @@ Geocoder.prototype.run = function(input,output,options) {
     //Success
     } else if ("lat" in result && "lng" in result) {
 
+      //Round off floating-point noise (e.g. -96.68371259999999)
+      if (options.precision !== null && options.precision !== false) {
+        result = {
+          lat: misc.round(result.lat,options.precision),
+          lng: misc.round(result.lng,options.precision)
+        };
+      }
+
       row[options.lat] = result.lat;
       row[options.lng] = result.lng;
 

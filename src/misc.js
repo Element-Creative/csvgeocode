@@ -1,4 +1,8 @@
 module.exports = {
+  //Round to a fixed number of decimal places, dropping trailing zeros
+  round: function(number,places) {
+    return Number(Number(number).toFixed(places));
+  },
   //Is it numeric and between -180 and +180?
   isNumeric: function(number) {
     return !Array.isArray(number) && (number - parseFloat(number) + 1) >= 0 && number >= -180 && number <= 180;
