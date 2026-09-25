@@ -74,9 +74,9 @@ describe("geocoding", () => {
   it("gives up on a request that doesn't answer within --timeout and moves on", { timeout: 20000 }, async () => {
     writeFixture(dir, "in.csv", 0, ["A,hang", "B,addr 2"]);
     const start = Date.now();
-    const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose", "--timeout", "300"]);
+    const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose", "--timeout", "300", "--retries", "0"]);
     assert.equal(code, 0);
-    assert.match(stderr, /^Timed out after 0\.3 seconds \| A,hang$/m);
+    assert.match(stderr, /^Timed out after 0\.3 seconds \| A,hang,,$/m);
     assert.match(stderr, /^SUCCESS \| B,addr 2,/m);
     assert.ok(Date.now() - start < 10000);
   });
@@ -84,9 +84,9 @@ describe("geocoding", () => {
   it("reports network errors on the row", async () => {
     writeFixture(dir, "in.csv", 1);
     const url = "http://127.0.0.1:" + (await closedPort()) + "/?a={{ADDRESS}}";
-    const { code, stderr } = await runCli(["in.csv", "out.csv", "--verbose", "--delay", "0", "--url", url], { cwd: dir });
+    const { code, stderr } = await runCli(["in.csv", "out.csv", "--verbose", "--delay", "0", "--retries", "0", "--url", url], { cwd: dir });
     assert.equal(code, 0);
-    assert.match(stderr, /^Network error: .*ECONNREFUSED.* \| Place 1,addr 1$/m);
+    assert.match(stderr, /^Network error: .*ECONNREFUSED.* \| Place 1,addr 1,,$/m);
   });
 
   it("detects existing latitude/longitude columns and fills them in place", async () => {
@@ -123,15 +123,15 @@ describe("geocoding", () => {
 
   it("leaves failed rows blank and keeps going", async () => {
     writeFixture(dir, "in.csv", 0, ["A,nomatch", "B,garbage", "C,http500", "D,addr 4"]);
-    const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose"]);
+    const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose", "--retries", "0"]);
     assert.equal(code, 0);
     const out = read(path.join(dir, "out.csv"));
     assert.match(out, /^A,nomatch,,$/m);
     assert.match(out, /^B,garbage,,$/m);
     assert.match(out, /^D,addr 4,32\./m);
     assert.match(stderr, /^NO MATCH \| A,nomatch/m);
-    assert.match(stderr, /^Parsing error: .* \| B,garbage/m);
-    assert.match(stderr, /^HTTP Status 500 \| C,http500/m);
+    assert.match(stderr, /^Parsing error: .* \| B,garbage,,$/m);
+    assert.match(stderr, /^HTTP Status 500 \| C,http500,,$/m);
     assert.match(stderr, /Rows geocoded: 1\nRows failed: 3/);
   });
 
@@ -146,6 +146,61 @@ describe("geocoding", () => {
     writeFixture(dir, "in.csv", 3);
     await cli(["in.csv", "out.csv", "--save-every", "1"]);
     assert.deepEqual(fs.readdirSync(dir).sort(), ["in.csv", "out.csv"]);
+  });
+
+});
+
+describe("temporary and fatal errors", () => {
+
+  it("retries a temporary error and then succeeds", { timeout: 20000 }, async () => {
+    writeFixture(dir, "in.csv", 0, ["X,overlimit"]);
+    const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose", "--retries", "1"]);
+    assert.equal(code, 0);
+    assert.match(stderr, /^Retrying in 2 seconds after OVER_QUERY_LIMIT: Slow down\. \| X,overlimit$/m);
+    assert.match(stderr, /^SUCCESS \| X,overlimit,32\./m);
+    assert.equal(server.requests.length, 2);
+  });
+
+  it("waits --delay after failed requests too", async () => {
+    writeFixture(dir, "in.csv", 0, ["A,http500", "B,http500", "C,http500"]);
+    await cli(["in.csv", "out.csv", "--retries", "0", "--delay", "150"]);
+    const [a, b, c] = server.requests.map(r => r.time);
+    assert.ok(b - a >= 140 && c - b >= 140, "gaps: " + (b - a) + ", " + (c - b));
+  });
+
+  it("stops and saves on an API key/account error, with a hint to resume", async () => {
+    writeFixture(dir, "in.csv", 1, ["X,denied", "Y,addr 3"]);
+    const { code, stderr } = await cli(["in.csv", "out.csv"]);
+    assert.equal(code, 1);
+    assert.match(stderr, /^Stopping: REQUEST_DENIED: The provided API key is invalid\.$/m);
+    assert.match(stderr, /^Saved 1 of 3 rows to out\.csv\. Once the problem is fixed, rerun with --resume to continue\.$/m);
+    assert.deepEqual(server.requests.map(r => r.address), ["addr 1", "denied"]);
+    assert.match(read(path.join(dir, "out.csv")), /^Place 1,addr 1,32\.[\d.]+,-96\.[\d.]+\nX,denied,,\nY,addr 3,,$/m);
+  });
+
+  it("treats HTTP 401/403 as fatal", async () => {
+    writeFixture(dir, "in.csv", 0, ["X,forbidden", "Y,addr 2"]);
+    const { code, stderr } = await cli(["in.csv", "out.csv"]);
+    assert.equal(code, 1);
+    assert.match(stderr, /^Stopping: HTTP Status 403$/m);
+    assert.equal(server.requests.length, 1);
+  });
+
+  it("stops after 5 rows in a row fail with temporary errors", async () => {
+    writeFixture(dir, "in.csv", 7);
+    const url = "http://127.0.0.1:" + (await closedPort()) + "/?a={{ADDRESS}}";
+    const { code, stderr } = await runCli(["in.csv", "out.csv", "--delay", "0", "--retries", "0", "--url", url], { cwd: dir });
+    assert.equal(code, 1);
+    assert.match(stderr, /^Stopping: the last 5 rows all failed with temporary errors, even after retrying\./m);
+    assert.match(stderr, /^Saved 5 of 7 rows to out\.csv\./m);
+    assert.equal(rowsOf(path.join(dir, "out.csv")).rows.length, 7);
+  });
+
+  it("only stops for failures in a row, not scattered ones", async () => {
+    writeFixture(dir, "in.csv", 0, [1, 2, 3, 4].map(i => "A" + i + ",http500 a" + i).concat(["B,addr 1"], [1, 2, 3, 4].map(i => "C" + i + ",http500 c" + i)));
+    const { code } = await cli(["in.csv", "out.csv", "--retries", "0"]);
+    assert.equal(code, 0);
+    assert.equal(server.requests.length, 9);
   });
 
 });
@@ -275,7 +330,8 @@ describe("command-line checks", () => {
     [["in.csv", "out.csv", "--delay", "abc"], /--delay requires a numeric value in milliseconds\./],
     [["in.csv", "out.csv", "--precision", "x"], /--precision requires a whole number of decimal places\./],
     [["in.csv", "out.csv", "--save-every", "x"], /--save-every requires a whole number of rows\./],
-    [["in.csv", "out.csv", "--timeout", "0"], /--timeout requires a whole number of milliseconds, greater than 0\./]
+    [["in.csv", "out.csv", "--timeout", "0"], /--timeout requires a whole number of milliseconds, greater than 0\./],
+    [["in.csv", "out.csv", "--retries", "x"], /--retries requires a whole number\./]
   ];
 
   for (const [args, message] of refusals) {
@@ -353,6 +409,29 @@ describe("Node module API", () => {
     const { rows, summary } = await run(input, { test: true, handler });
     assert.deepEqual(rows.map(r => [r.err, r.row.lat]), [[null, 1.5], ["CUSTOM ERROR", ""]]);
     assert.equal(summary.successes, 1);
+  });
+
+  it("retries with the given waits and emits a retry event each time", async () => {
+    const input = writeFixture(dir, "in.csv", 0, ["X,flaky"]);
+    const retries = [];
+    const { rows } = await new Promise(resolve => {
+      const rows = [];
+      geocode(input, { delay: 0, url: server.url(), test: true, retryWaits: [10, 20] })
+        .on("retry", (retry, row) => retries.push(retry))
+        .on("row", (err, row) => rows.push({ err, row: { ...row } }))
+        .on("complete", () => resolve({ rows }));
+    });
+    assert.deepEqual(retries.map(r => [r.error, r.wait, r.retry, r.retries]), [["HTTP Status 503", 10, 1, 3], ["HTTP Status 503", 20, 2, 3]]);
+    assert.equal(rows[0].err, null);
+    assert.equal(server.requests.length, 3);
+  });
+
+  it("gives up after `retries` and reports the last error", async () => {
+    const input = writeFixture(dir, "in.csv", 0, ["X,flaky"]);
+    const { rows } = await run(input, { test: true, retries: 1, retryWaits: [10] });
+    assert.equal(rows[0].err, "HTTP Status 503");
+    assert.equal(rows[0].row.lat, "");
+    assert.equal(server.requests.length, 2);
   });
 
   it("throws right away without a url or with an unknown handler", () => {

@@ -97,6 +97,19 @@ How long to wait for each API response. If there's no answer in time, that row f
 
 **Default:** 30000
 
+#### `--retries [number]`
+
+How many times to retry a request that failed with a temporary problem: a network error, a timeout, a rate limit (HTTP 429 or Google's `OVER_QUERY_LIMIT`), a server error (HTTP 5xx or Google's `UNKNOWN_ERROR`), or a response that isn't what the API normally sends (like a Wi-Fi login page). It waits 2 seconds, then 10, then 30 between tries. Set to 0 to not retry.
+
+Some problems stop the run instead, after saving progress, because every remaining row would fail the same way:
+
+* an API key or account problem: HTTP 401 or 403, or Google's `REQUEST_DENIED` or `OVER_DAILY_LIMIT`
+* 5 rows in a row that still failed with temporary problems after retrying (e.g. the network is down)
+
+Fix the problem, then rerun with `--resume` to continue.
+
+**Default:** 3
+
 #### `--force`
 
 By default, if a lat/lng is already found in an input row, that will be kept.  If you want to re-geocode every row no matter what and replace any lat/lngs that already exist, add `--force`.  This means you'll hit API limits faster and the process will take longer.
@@ -188,7 +201,7 @@ csvgeocode("input.csv",options);
 csvgeocode("input.csv","output.csv",options);
 ```
 
-`csvgeocode` runs asynchronously, but you can listen for events. The main ones are `row` and `complete`; there's also `error` (a problem that stops the run, like an unreadable input file: if nothing listens for it, it's thrown), `progress` (each time progress is saved) and `resume` (when `resume: true` picks up a previous run).
+`csvgeocode` runs asynchronously, but you can listen for events. The main ones are `row` and `complete`; there's also `error` (a problem that stops the run, like an unreadable input file or a bad API key: if nothing listens for it, it's thrown), `retry` (before each retry of a failed request), `progress` (each time progress is saved) and `resume` (when `resume: true` picks up a previous run).
 
 `row` is triggered when each row is processed. It passes a string error message if geocoding the row failed, and the row itself.
 
@@ -234,7 +247,7 @@ You can use any basic geocoding service from within a Node script by supplying a
 
 The easiest way to see what a handler should look like is to look at [handlers.js](./src/handlers.js).
 
-The handler function is passed the body of an API response and should either return a string error message or an object with `lat` and `lng` properties.
+The handler function is passed the body of an API response and should either return a string error message or an object with `lat` and `lng` properties. It can also return `{ retry: "message" }` for a temporary problem that's worth retrying, or `{ fatal: "message" }` for one that should stop the whole run (like an invalid API key). If it throws, that's treated as a temporary problem.
 
 ```js
 

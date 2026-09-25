@@ -41,6 +41,9 @@ export default function generate(input, output, options) {
 
 }
 
+//An error that ends the whole run (after saving progress)
+class StopError extends Error {}
+
 class Geocoder extends EventEmitter {
 
   run(input, output, options) {
@@ -52,7 +55,8 @@ class Geocoder extends EventEmitter {
 
     let rows = null, //All parsed rows, filled in as they're geocoded
         done = 0, //Number of rows processed so far
-        unsaved = 0; //Number of rows geocoded since the last save
+        unsaved = 0, //Number of rows geocoded since the last save
+        failedInARow = 0; //Consecutive rows that failed with temporary errors
 
     this.options = options;
     this.saveProgress = saveProgress;
@@ -88,13 +92,28 @@ class Geocoder extends EventEmitter {
         _this.emit("resume", { found: true, done: resumed.size, total: parsed.length });
       }
 
-      for (const row of rows) {
-        const skipped = needsNoGeocoding(row);
-        await codeRow(row);
-        done++;
-        if (!skipped && options.saveEvery > 0 && ++unsaved >= options.saveEvery && done < rows.length) {
-          saveProgress();
+      try {
+
+        for (const row of rows) {
+          const skipped = needsNoGeocoding(row);
+          await codeRow(row);
+          done++;
+          if (!skipped && options.saveEvery > 0 && ++unsaved >= options.saveEvery && done < rows.length) {
+            saveProgress();
+          }
+          //Every row lately failed with a temporary error: the network or
+          //the API is probably down, so stop rather than fail every row
+          if (options.maxFailedInARow > 0 && failedInARow >= options.maxFailedInARow) {
+            throw new StopError("Stopping: the last " + failedInARow + " rows all failed with temporary errors, even after retrying. Check your network connection and the API's status.");
+          }
         }
+
+      } catch (e) {
+        //Save what's done so the run can be resumed
+        if (e instanceof StopError) {
+          e.progress = saveProgress();
+        }
+        throw e;
       }
 
       await complete(rows);
@@ -125,46 +144,96 @@ class Geocoder extends EventEmitter {
 
       }
 
-      let response, body;
+      let outcome = await attempt(url);
+
+      //Temporary problem: wait and try again
+      for (let retry = 0; outcome.retry && retry < options.retries; retry++) {
+        const wait = retryWait(retry);
+        _this.emit("retry", { error: outcome.message, wait: wait, retry: retry + 1, retries: options.retries }, row);
+        await sleep(wait);
+        outcome = await attempt(url);
+      }
+
+      //A problem with the API key or account: every row would fail
+      if (outcome.fatal) {
+        throw new StopError("Stopping: " + outcome.message);
+      }
+
+      if (outcome.result) {
+
+        row[options.lat] = outcome.result.lat;
+        row[options.lng] = outcome.result.lng;
+
+        //Cache the result
+        cache[url] = outcome.result;
+        failedInARow = 0;
+        _this.emit("row", null, row);
+
+      } else {
+
+        row[options.lat] = "";
+        row[options.lng] = "";
+
+        failedInARow = outcome.retry ? failedInARow + 1 : 0;
+        _this.emit("row", outcome.message, row);
+
+      }
+
+      await sleep(options.delay);
+
+    }
+
+    //Request one URL. Resolves to { result: {lat, lng} } on success, or
+    //{ message } for a failed row, plus retry: true if it's worth trying
+    //again or fatal: true if the whole run should stop.
+    async function attempt(url) {
+
+      let response, body, result;
 
       try {
         response = await fetch(url, { signal: AbortSignal.timeout(options.timeout) });
         body = await response.text();
       } catch (e) {
-        _this.emit("row", describeError(e), row);
-        return;
+        return { message: describeError(e), retry: true };
       }
 
       if (response.status !== 200) {
-        _this.emit("row", "HTTP Status " + response.status, row);
-        return;
+        const message = "HTTP Status " + response.status;
+        //Bad key or no access
+        if (response.status === 401 || response.status === 403) {
+          return { message: message, fatal: true };
+        }
+        //Rate limited or server trouble
+        if (response.status === 429 || response.status >= 500) {
+          return { message: message, retry: true };
+        }
+        return { message: message };
       }
 
-      handleResponse(body, row, url);
-      await sleep(options.delay);
-
-    }
-
-    function handleResponse(body, row, url) {
-
-      let result;
-
+      //A body the handler can't read (e.g. a Wi-Fi login page) isn't the
+      //address's fault
       try {
         result = options.handler(body);
       } catch (e) {
-        result = "Parsing error: " + e.toString();
+        return { message: "Parsing error: " + e.toString(), retry: true };
       }
 
       //Error code
       if (typeof result === "string") {
+        return { message: result };
+      }
 
-        row[options.lat] = "";
-        row[options.lng] = "";
+      //Handlers can flag errors as temporary or fatal
+      if (result && typeof result.retry === "string") {
+        return { message: result.retry, retry: true };
+      }
 
-        _this.emit("row", result, row);
+      if (result && typeof result.fatal === "string") {
+        return { message: result.fatal, fatal: true };
+      }
 
       //Success
-      } else if (result && "lat" in result && "lng" in result) {
+      if (result && "lat" in result && "lng" in result) {
 
         //Round off floating-point noise (e.g. -96.68371259999999)
         if (options.precision !== null && options.precision !== false) {
@@ -174,20 +243,20 @@ class Geocoder extends EventEmitter {
           };
         }
 
-        row[options.lat] = result.lat;
-        row[options.lng] = result.lng;
-
-        //Cache the result
-        cache[url] = result;
-        _this.emit("row", null, row);
-
-      //Unknown extraction error
-      } else {
-
-        _this.emit("row", "Invalid return value from handler for response body: " + body, row);
+        return { result: { lat: result.lat, lng: result.lng } };
 
       }
 
+      //Unknown extraction error
+      return { message: "Invalid return value from handler for response body: " + body };
+
+    }
+
+    //Milliseconds to wait before the nth retry (0-based), repeating the last
+    //wait if there are more retries than waits
+    function retryWait(retry) {
+      const waits = options.retryWaits;
+      return waits[Math.min(retry, waits.length - 1)];
     }
 
     //A readable message for a request that got no response

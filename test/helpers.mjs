@@ -30,6 +30,7 @@ export function rounded(raw, places = 6) {
 //   "nomatch..."  -> ZERO_RESULTS
 //   "garbage..."  -> 200 with an HTML body
 //   "http500..."  -> HTTP 500
+//   "forbidden..." -> HTTP 403
 //   "denied..."   -> REQUEST_DENIED
 //   "overlimit..." -> OVER_QUERY_LIMIT the first time, then OK
 //   "flaky..."    -> HTTP 503 twice, then OK
@@ -47,7 +48,7 @@ export async function startServer() {
     const url = new URL(req.url, "http://localhost");
     const address = url.searchParams.get("address") ?? "";
     const key = url.searchParams.get("key");
-    requests.push({ url: req.url, address, key });
+    requests.push({ url: req.url, address, key, time: Date.now() });
 
     const count = (seen.get(address) ?? 0) + 1;
     seen.set(address, count);
@@ -67,6 +68,10 @@ export async function startServer() {
     if (address.startsWith("http500")) {
       res.statusCode = 500;
       return res.end("Internal Server Error");
+    }
+    if (address.startsWith("forbidden")) {
+      res.statusCode = 403;
+      return res.end("Forbidden");
     }
     if (address.startsWith("denied")) {
       return json({ status: "REQUEST_DENIED", error_message: "The provided API key is invalid.", results: [] });

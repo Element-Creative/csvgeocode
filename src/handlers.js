@@ -15,8 +15,20 @@ export default {
       return "NO MATCH";
     }
 
+    var message = response.status + (response.error_message && response.error_message.length ? ": " + response.error_message : "");
+
+    //Temporary problem, worth retrying
+    if (response.status === "OVER_QUERY_LIMIT" || response.status === "UNKNOWN_ERROR") {
+      return { retry: message };
+    }
+
+    //Problem with the API key or account, every row would fail
+    if (response.status === "REQUEST_DENIED" || response.status === "OVER_DAILY_LIMIT") {
+      return { fatal: message };
+    }
+
     //Other error, return a string
-    return response.status + (response.error_message && response.error_message.length ? ": " + response.error_message : "");
+    return message;
 
   },
   mapbox: function(body) {
