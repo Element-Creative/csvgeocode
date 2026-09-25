@@ -116,7 +116,7 @@ class Geocoder extends EventEmitter {
       } catch (e) {
         //Save what's done so the run can be resumed
         if (e instanceof StopError) {
-          e.progress = saveProgress();
+          e.progress = saveProgress({ quiet: true });
         }
         throw e;
       }
@@ -326,8 +326,9 @@ class Geocoder extends EventEmitter {
     }
 
     //Write every row so far (geocoded ones plus the untouched remainder) to the
-    //output file, so an interrupted run can resume by using it as the input
-    function saveProgress() {
+    //output file, so an interrupted run can resume by using it as the input.
+    //quiet: skip the "progress" event, when the caller reports the save itself.
+    function saveProgress({ quiet = false } = {}) {
 
       if (!rows || typeof output !== "string" || options.test) {
         return null;
@@ -337,7 +338,9 @@ class Geocoder extends EventEmitter {
       unsaved = 0;
 
       const progress = { done: done, total: rows.length };
-      _this.emit("progress", progress);
+      if (!quiet) {
+        _this.emit("progress", progress);
+      }
       return progress;
 
     }

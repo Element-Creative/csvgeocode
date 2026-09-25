@@ -154,7 +154,7 @@ geocoder.on("resume", function(progress) {
 //On Ctrl-C or kill, save whatever has been geocoded so far before exiting
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, function() {
-    const progress = geocoder.saveProgress();
+    const progress = geocoder.saveProgress({ quiet: true });
     if (progress) {
       console.warn("\nInterrupted. Saved " + progress.done + " of " + progress.total + " rows to " + output);
     }

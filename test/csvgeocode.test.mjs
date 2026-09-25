@@ -202,7 +202,8 @@ describe("temporary and fatal errors", () => {
 
   it("stops and saves on an API key/account error, with a hint to resume", async () => {
     writeFixture(dir, "in.csv", 1, ["X,denied", "Y,addr 3"]);
-    const { code, stderr } = await cli(["in.csv", "out.csv"]);
+    const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose"]);
+    assert.doesNotMatch(stderr, /Saved progress/);
     assert.equal(code, 1);
     assert.match(stderr, /^Stopping: REQUEST_DENIED: The provided API key is invalid\.$/m);
     assert.match(stderr, /^Saved 1 of 3 rows to out\.csv\. Once the problem is fixed, rerun with --resume to continue\.$/m);
@@ -264,7 +265,7 @@ describe("interrupting and resuming", () => {
   // Start a slow run, Ctrl-C it after a few requests, and return the result.
   async function interrupted(rows) {
     writeFixture(dir, "in.csv", rows);
-    const result = await cli(["in.csv", "out.csv", "--delay", "30"], {
+    const result = await cli(["in.csv", "out.csv", "--delay", "30", "--verbose"], {
       onSpawn: async child => {
         await waitFor(() => server.requests.length >= 5);
         child.kill("SIGINT");
@@ -277,6 +278,7 @@ describe("interrupting and resuming", () => {
     const { code, stderr } = await interrupted(40);
     assert.equal(code, 130);
     assert.match(stderr, /Interrupted\. Saved \d+ of 40 rows to out\.csv/);
+    assert.doesNotMatch(stderr, /Saved progress/);
     const { header, rows } = rowsOf(path.join(dir, "out.csv"));
     assert.equal(header, "NAME,ADDRESS,lat,lng");
     assert.equal(rows.length, 40);
