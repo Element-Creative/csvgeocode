@@ -42,6 +42,10 @@ export default function generate(input, output, options) {
     throw new Error("'url' parameter is required.");
   }
 
+  if (typeof options.encoding !== "string" || !csv.canonicalEncoding(options.encoding)) {
+    throw new Error("Invalid value for 'encoding' option: " + JSON.stringify(options.encoding) + ". Must be an encoding name like utf-8, windows-1252 or macintosh.");
+  }
+
   return new Geocoder().run(input, output || null, options);
 
 }
@@ -86,7 +90,9 @@ class Geocoder extends EventEmitter {
 
     async function start() {
 
-      const parsed = await csv.read(input);
+      //The output file (read for --resume) is always UTF-8, since csvgeocode
+      //wrote it; only the input can be in another encoding
+      const parsed = await csv.read(input, options.encoding);
       let previous = null;
 
       checkTemplate(parsed.columns);

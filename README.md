@@ -54,7 +54,7 @@ https://maps.googleapis.com/maps/api/geocode/json?address={{address}}&key=MY_API
 http://geoservices.tamu.edu/Services/Geocode/WebService/GeocoderWebServiceHttpNonParsed_V04_01.aspx?apiKey=MY_API_KEY&version=4.01&streetAddress={{address}}&city={{city}}&state={{state}}
 ```
 
-Before making any requests, csvgeocode checks that every `{{column}}` in the URL is a column in your CSV (names are case-sensitive), so a typo can't quietly geocode partial addresses. It also refuses to run if your CSV has two columns with the same name, since only one of them could ever be kept. CSVs saved by Excel as "CSV UTF-8" are handled too: the invisible marker at the start of the file is ignored when matching column names and kept in the output file.
+Before making any requests, csvgeocode checks that every `{{column}}` in the URL is a column in your CSV (names are case-sensitive), so a typo can't quietly geocode partial addresses. It also refuses to run if your CSV has two columns with the same name, since only one of them could ever be kept. The input has to be UTF-8 (see [Text encoding](#text-encoding) for what happens if it isn't, and `--encoding`).
 
 If several rows end up with the same URL (the same address), it's only requested once, and the other rows reuse the result, whether that was a match or a permanent failure like `NO MATCH`. Temporary failures (e.g. a timeout) aren't reused, so a later row with the same address tries again.
 
@@ -86,6 +86,18 @@ $ csvgeocode input.csv --url "http://geoservices.tamu.edu/Services/Geocode/WebSe
 ```
 
 **Default:** `"google"`
+
+#### `--encoding [name]`
+
+The input file's text encoding, if it isn't UTF-8. csvgeocode never guesses: a file that isn't valid UTF-8 stops with an error before any request is made, and this option is how you tell it what the file really is. The names you're most likely to need:
+
+* `windows-1252`: plain "CSV" from Excel on Windows, and most other Windows programs (also called ANSI or CP1252; `latin1` and `iso-8859-1` are treated as the same thing).
+* `macintosh`: plain "CSV" from Excel on a Mac (Mac Roman).
+* `utf-16le`: exports from SQL Server, older PowerShell and some other Windows tools.
+
+Any other [WHATWG encoding name](https://encoding.spec.whatwg.org/#names-and-labels) works too. The output is always UTF-8, whatever the input was. See [Text encoding](#text-encoding) for the details and the cases this doesn't cover.
+
+**Default:** `utf-8`
 
 #### `--lat [latitude column name]`
 
@@ -224,6 +236,7 @@ You can add all the same options in a script, except for `verbose`, which is CLI
 | ------------------ | -------------------- | ------- |
 | `url`               | `--url`               | (required) |
 | `handler`           | `--handler`           | `"google"` |
+| `encoding`          | `--encoding`          | `"utf-8"` |
 | `lat`               | `--lat`               | automatic detection |
 | `lng`               | `--lng`               | automatic detection |
 | `delay`             | `--delay`             | `250` |
@@ -332,6 +345,34 @@ function customHandler(body) {
   return "NO MATCH";
 }
 ```
+
+## Text encoding
+
+csvgeocode reads the input as UTF-8 unless you say otherwise with `--encoding`, and always writes UTF-8. It never guesses an encoding, because a wrong guess silently turns every accented character into a different accented character, and nobody notices until the client opens the file. So the rule is: if a file isn't valid UTF-8, csvgeocode stops before spending anything on API calls and tells you, and you either re-save the file as UTF-8 or pass `--encoding`.
+
+Things that work as-is:
+
+* UTF-8 with or without a byte order mark (BOM). Excel's "CSV UTF-8" format, Google Sheets, Numbers, LibreOffice, Airtable, HubSpot, Salesforce and most modern exports all produce this. If the input had a BOM, the output gets one too; otherwise it doesn't.
+* Plain ASCII, which is valid UTF-8 (and valid everything else).
+
+Known cases that need `--encoding`:
+
+* **Excel's plain "CSV (Comma delimited)" format** writes the system's legacy encoding, not UTF-8: `windows-1252` on Windows and `macintosh` on a Mac. Any accented name or address makes the file invalid UTF-8. The easy fix is to re-save it as "CSV UTF-8"; otherwise pass the matching `--encoding`.
+* **UTF-16 files** from SQL Server, older PowerShell versions and some Windows tools. These get their own error message, since they aren't a UTF-8 problem; pass `--encoding utf-16le` (or `utf-16be`).
+* **Older CRM, ERP and mailing-list exports**, which are usually `windows-1252` or one of the `iso-8859-*` family.
+
+Known cases csvgeocode can't detect or fix:
+
+* **Text that was already mangled before it got to csvgeocode**, e.g. `CafÃ©` for `Café`, which happens when a UTF-8 file is opened as Windows-1252 and re-saved. That's valid UTF-8, so it's passed through unchanged and sent to the geocoder as-is. Fix the file upstream.
+* **A file with more than one encoding**, e.g. rows pasted together from different sources. It's refused as invalid UTF-8 (or, with `--encoding`, decoded wrongly in places). Convert the pieces separately.
+* **An input with only ASCII characters in the wrong encoding.** Nothing to detect, and nothing goes wrong.
+* **Converting to anything but UTF-8.** If whatever reads the output needs a legacy encoding, convert it afterwards with a tool like `iconv -f UTF-8 -t CP1252 out.csv > out_cp1252.csv` (on a Mac or Linux) or PowerShell's `Get-Content ... | Set-Content -Encoding ...`. The same `iconv` in the other direction is the general escape hatch for any input `--encoding` doesn't cover.
+
+Known cases on the *output* side, which are about the program opening the file rather than csvgeocode:
+
+* **Excel on Windows opens a UTF-8 file without a BOM as ANSI**, so accented characters look wrong. If your input didn't have a BOM (a plain Windows-1252 Excel file never does), either use Excel's Data → From Text/CSV import and pick UTF-8, or add a BOM after the fact. The content is correct; it's Excel's default that's wrong.
+* **The opposite problem for a BOM**: if the input had one, the output has one too, and some programs (Python's `csv` module, PostgreSQL's `COPY`, some import tools) then see a first column named `\ufeffNAME`. Strip it (`sed '1s/^\xEF\xBB\xBF//'`) or tell that tool the file is `utf-8-sig`.
+* **Accented characters written two different ways.** Text from Macs sometimes stores `é` as `e` plus a combining accent (NFD) rather than a single character (NFC). Both are valid UTF-8 and csvgeocode keeps whichever it got; the geocoders handle both, but a spreadsheet lookup or database join between the two forms won't match. Normalize upstream if that matters.
 
 ## Contributing/tests
 

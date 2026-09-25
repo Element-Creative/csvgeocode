@@ -259,6 +259,74 @@ describe("input checks", () => {
 
 });
 
+describe("input encoding", () => {
+
+  //"Café René" as Excel's plain CSV writes it on Windows (Windows-1252)
+  //and on a Mac (Mac Roman): one byte per accented letter, not valid UTF-8
+  const cp1252 = Buffer.from("NAME,ADDRESS\nCaf\xe9 Ren\xe9,addr 1\n", "latin1"),
+        macRoman = Buffer.from("NAME,ADDRESS\nCaf\x8e Ren\x8e,addr 1\n", "latin1");
+
+  it("refuses a file that isn't valid UTF-8, before any request, with a hint", async () => {
+    fs.writeFileSync(path.join(dir, "in.csv"), cp1252);
+    const { code, stderr } = await cli(["in.csv", "out.csv"]);
+    assert.equal(code, 1);
+    assert.match(stderr, /^in\.csv isn't valid UTF-8\. In Excel, save it as "CSV UTF-8" instead of plain "CSV", or tell csvgeocode the file's encoding: --encoding windows-1252 \(Excel on Windows\) or --encoding macintosh \(Excel on a Mac\)\.$/m);
+    assert.equal(server.requests.length, 0);
+    assert.deepEqual(fs.readdirSync(dir), ["in.csv"]);
+  });
+
+  it("decodes the input with --encoding and writes UTF-8 without a byte order mark", async () => {
+    fs.writeFileSync(path.join(dir, "in.csv"), cp1252);
+    const { code } = await cli(["in.csv", "out.csv", "--encoding", "windows-1252"]);
+    assert.equal(code, 0);
+    assert.equal(server.requests[0].address, "addr 1");
+    assert.equal(read(path.join(dir, "out.csv")), "NAME,ADDRESS,lat,lng\nCafé René,addr 1," + rounded(rawLat(1)) + "," + rounded(rawLng(1)));
+
+    fs.writeFileSync(path.join(dir, "mac.csv"), macRoman);
+    await cli(["mac.csv", "mac_out.csv", "--encoding", "macintosh"]);
+    assert.match(read(path.join(dir, "mac_out.csv")), /^Café René,addr 1,/m);
+  });
+
+  it("can resume a run whose input needed --encoding", async () => {
+    fs.writeFileSync(path.join(dir, "in.csv"), Buffer.concat([cp1252, Buffer.from("Plain,addr 2\n")]));
+    await cli(["in.csv", "out.csv", "--encoding", "windows-1252"]);
+    server.reset();
+    const { code, stderr } = await cli(["in.csv", "out.csv", "--encoding", "windows-1252", "--resume"]);
+    assert.equal(code, 0);
+    assert.match(stderr, /Resuming: 2 of 2 rows/);
+    assert.equal(server.requests.length, 0);
+  });
+
+  it("names UTF-16 specifically when the file has a UTF-16 byte order mark", async () => {
+    fs.writeFileSync(path.join(dir, "in.csv"), Buffer.from("\uFEFFNAME,ADDRESS\nA,addr 1\n", "utf16le"));
+    const { code, stderr } = await cli(["in.csv", "out.csv"]);
+    assert.equal(code, 1);
+    assert.match(stderr, /^in\.csv is UTF-16, not UTF-8\. Convert it to UTF-8 first .*, or pass --encoding utf-16le or --encoding utf-16be\.$/m);
+
+    const ok = await cli(["in.csv", "out.csv", "--encoding", "utf-16le"]);
+    assert.equal(ok.code, 0);
+    assert.equal(read(path.join(dir, "out.csv")), "\uFEFFNAME,ADDRESS,lat,lng\nA,addr 1," + rounded(rawLat(1)) + "," + rounded(rawLng(1)));
+  });
+
+  it("still accepts plain UTF-8, with or without a byte order mark, and already-mojibaked text as-is", async () => {
+    //"Ã©" is what a UTF-8 "é" looks like after being mis-read as Windows-1252
+    //upstream; it's valid UTF-8, so csvgeocode can't tell and passes it through
+    fs.writeFileSync(path.join(dir, "in.csv"), "NAME,ADDRESS\nCafÃ© René,addr 1\n");
+    const { code } = await cli(["in.csv", "out.csv"]);
+    assert.equal(code, 0);
+    assert.match(read(path.join(dir, "out.csv")), /^CafÃ© René,addr 1,/m);
+  });
+
+  it("refuses an --encoding name Node doesn't know", async () => {
+    writeFixture(dir, "in.csv", 1);
+    const { code, stderr } = await cli(["in.csv", "out.csv", "--encoding", "ansi"]);
+    assert.equal(code, 1);
+    assert.match(stderr, /^--encoding: "ansi" isn't an encoding Node knows\./m);
+    assert.equal(server.requests.length, 0);
+  });
+
+});
+
 describe("temporary and fatal errors", () => {
 
   it("retries a temporary error and then succeeds", { timeout: 20000 }, async () => {
@@ -701,9 +769,19 @@ describe("Node module API", () => {
     assert.equal(server.requests.length, 0);
   });
 
-  it("throws right away without a url or with an unknown handler", () => {
+  it("throws right away without a url, with an unknown handler, or with an unknown encoding", () => {
     assert.throws(() => geocode("in.csv", { test: true }), /url/i);
     assert.throws(() => geocode("in.csv", { test: true, url: "x", handler: "nope" }), /invalid value/i);
+    assert.throws(() => geocode("in.csv", { test: true, url: "x", encoding: "ansi" }), /invalid value for 'encoding'/i);
+  });
+
+  it("emits an EncodingError-style error for a non-UTF-8 input", async () => {
+    const input = path.join(dir, "in.csv");
+    fs.writeFileSync(input, Buffer.from("NAME,ADDRESS\nCaf\xe9,addr 1\n", "latin1"));
+    const err = await new Promise(resolve => geocode(input, { url: server.url(), test: true }).on("error", resolve));
+    assert.match(err.message, /isn't valid UTF-8/);
+    const ok = await run(input, { test: true, encoding: "windows-1252" });
+    assert.equal(ok.rows[0].row.NAME, "Café");
   });
 
 });

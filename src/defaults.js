@@ -11,5 +11,6 @@ export default {
   precision: 6,
   statusColumns: false,
   saveEvery: 100,
-  handler: "google"
+  handler: "google",
+  encoding: "utf-8"
 };

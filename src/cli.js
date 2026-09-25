@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import geocode from "./csvgeocode.js";
-import { stringifyRow } from "./csv.js";
+import { stringifyRow, canonicalEncoding } from "./csv.js";
 import * as misc from "./misc.js";
 
 const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url)));
@@ -14,6 +14,7 @@ With no output CSV, results are written to stdout.
 Options:
   --url             [REQUIRED] A URL template to use, with column names from your input CSV surrounded by {{}}. Example: http://mygeocoder.com/?address={{STREET_ADDRESS}}&apiKey=123ABC
   --handler         What API handler to use. Built-in options are 'google', 'mapbox', 'osm' and 'tamu'. Default: 'google'
+  --encoding        The input file's text encoding, if it isn't UTF-8: e.g. 'windows-1252' (plain CSV from Excel on Windows) or 'macintosh' (Excel on a Mac). Output is always UTF-8. Default: 'utf-8'
   --lat             Latitude column name. Default: automatic detection
   --lng             Longitude column name. Default: automatic detection
   --delay           Milliseconds to wait between API calls. Default: 250
@@ -44,6 +45,7 @@ try {
     options: {
       url: { type: "string" },
       handler: { type: "string" },
+      encoding: { type: "string" },
       lat: { type: "string" },
       lng: { type: "string" },
       delay: { type: "string" },
@@ -123,10 +125,14 @@ if ("save-every" in args && !/^\d+$/.test(args["save-every"])) {
   fail("--save-every requires a whole number of rows.");
 }
 
+if ("encoding" in args && !canonicalEncoding(args.encoding)) {
+  fail("--encoding: \"" + args.encoding + "\" isn't an encoding Node knows. Try utf-8, windows-1252, macintosh, utf-16le or another WHATWG encoding name.");
+}
+
 const [input, output] = files,
       options = { url: args.url };
 
-for (const key of ["handler", "lat", "lng"]) {
+for (const key of ["handler", "encoding", "lat", "lng"]) {
   if (key in args) options[key] = args[key];
 }
 
