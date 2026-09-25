@@ -26,7 +26,8 @@ export function rounded(raw, places = 6) {
 }
 
 // A fake Google-style geocoder. The address decides the response:
-//   "addr N"      -> OK, coordinates from rawLat(N)/rawLng(N)
+//   "addr N"      -> OK, coordinates from rawLat(N)/rawLng(N), ROOFTOP
+//   "partial N"   -> OK, but APPROXIMATE and a partial match
 //   "nomatch..."  -> ZERO_RESULTS
 //   "garbage..."  -> 200 with an HTML body
 //   "http500..."  -> HTTP 500
@@ -57,9 +58,10 @@ export async function startServer() {
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(body));
     };
-    const ok = n => {
+    const ok = (n, partial) => {
       res.setHeader("Content-Type", "application/json");
-      res.end('{"status":"OK","results":[{"geometry":{"location":{"lat":' + rawLat(n) + ',"lng":' + rawLng(n) + "}}}]}");
+      res.end('{"status":"OK","results":[{"geometry":{"location":{"lat":' + rawLat(n) + ',"lng":' + rawLng(n) + '},' +
+        '"location_type":"' + (partial ? "APPROXIMATE" : "ROOFTOP") + '"}' + (partial ? ',"partial_match":true' : "") + "}]}");
     };
 
     if (address.startsWith("hang")) return;
@@ -84,7 +86,7 @@ export async function startServer() {
       return res.end("Service Unavailable");
     }
 
-    ok(Number((address.match(/\d+/) ?? ["0"])[0]));
+    ok(Number((address.match(/\d+/) ?? ["0"])[0]), address.startsWith("partial"));
   });
 
   server.on("connection", socket => {

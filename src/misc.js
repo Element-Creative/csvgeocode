@@ -3,9 +3,9 @@ export function round(number, places) {
   return Number(Number(number).toFixed(places));
 }
 
-//Is it numeric and between -180 and +180?
-export function isNumeric(number) {
-  return !Array.isArray(number) && (number - parseFloat(number) + 1) >= 0 && number >= -180 && number <= 180;
+//Is it numeric and between -limit and +limit? (90 for latitude, 180 for longitude)
+export function isNumeric(number, limit = 180) {
+  return !Array.isArray(number) && (number - parseFloat(number) + 1) >= 0 && number >= -limit && number <= limit;
 }
 
 //Try to auto-discover missing column names

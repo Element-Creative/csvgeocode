@@ -9,6 +9,7 @@ export default {
   force: false,
   resume: false,
   precision: 6,
+  statusColumns: false,
   saveEvery: 100,
   handler: "google"
 };

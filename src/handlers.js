@@ -5,9 +5,15 @@ export default {
 
     var response = JSON.parse(body);
 
-    //Success, return a lat/lng object
+    //Success, return a lat/lng object, plus how precise the match is
     if (response.results && response.results.length) {
-      return response.results[0].geometry.location;
+      var result = response.results[0];
+      return {
+        lat: result.geometry.location.lat,
+        lng: result.geometry.location.lng,
+        locationType: result.geometry.location_type,
+        partialMatch: result.partial_match === true
+      };
     }
 
     //No match, return a string

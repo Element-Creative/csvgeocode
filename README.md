@@ -3,7 +3,7 @@ csvgeocode
 
 For when you have a CSV with addresses and you want a lat/lng for every row.  Bulk geocode addresses a CSV with a few lines of code.
 
-The defaults are configured for [Google's geocoder](https://developers.google.com/maps/documentation/geocoding/) but it can be configured to work with any other similar geocoding service.  There are built-in response handlers for [Google](https://developers.google.com/maps/documentation/geocoding/), [Mapbox](https://www.mapbox.com/developers/api/geocoding/), [OSM Nominatim](http://nominatim.openstreetmap.org/), and [Texas A & M's](http://geoservices.tamu.edu/Services/Geocode/WebService/) geocoders (details below).
+The defaults are configured for [Google's geocoder](https://developers.google.com/maps/documentation/geocoding/) but it can be configured to work with any other similar geocoding service.  There are built-in response handlers for [Google](https://developers.google.com/maps/documentation/geocoding/), [Mapbox](https://www.mapbox.com/developers/api/geocoding/), [OSM Nominatim](http://nominatim.openstreetmap.org/), and [Texas A & M's](http://geoservices.tamu.edu/Services/Geocode/WebService/) geocoders (details below). Only the Google handler is maintained and in regular use; the others are unchanged from the original project and haven't been tested against their live services in years (see [`--handler`](#--handler-handler)).
 
 Make sure that you use this in compliance with the relevant API's terms of service.
 
@@ -56,6 +56,8 @@ http://geoservices.tamu.edu/Services/Geocode/WebService/GeocoderWebServiceHttpNo
 
 Before making any requests, csvgeocode checks that every `{{column}}` in the URL is a column in your CSV (names are case-sensitive), so a typo can't quietly geocode partial addresses. CSVs saved by Excel as "CSV UTF-8" are handled too: the invisible marker at the start of the file is ignored when matching column names and kept in the output file.
 
+If several rows end up with the same URL (the same address), it's only requested once, and the other rows reuse the result, whether that was a match or a permanent failure like `NO MATCH`. Temporary failures (e.g. a timeout) aren't reused, so a later row with the same address tries again.
+
 If your addresses are broken up into multiple columns (e.g. a street_address column, a city column, and a state column), you can use them all together in a URL template:
 
 ```
@@ -65,6 +67,14 @@ https://maps.googleapis.com/maps/api/geocode/json?address={{street_address}},{{c
 #### `--handler [handler]`
 
 What handler function to process the API response with.  Current built-in handlers are `"google"`, `"mapbox"`, `"osm"`, and `"tamu"`. Contributions of handlers for other geocoders are welcome! You can define a custom handler when using this as a Node module (see below).
+
+**Only `google` is maintained.** `mapbox`, `osm` and `tamu` are unchanged from the original project (last updated in 2016) and haven't been tested against their live services since, so they may not work as-is. Known concerns:
+
+* **Mapbox:** the example URL below uses Mapbox's old v4 geocoding endpoint; Mapbox has since moved to newer API versions, whose responses may not match what the handler expects.
+* **OSM Nominatim:** its [usage policy](https://operations.osmfoundation.org/policies/nominatim/) requires an identifying User-Agent and at most 1 request per second. csvgeocode only sends Node's generic `node` User-Agent, and you'd need `--delay 1000`.
+* **Texas A&M:** the example URL uses plain `http`, and the API version in it may be outdated.
+
+If you rely on one of these, test it on a few rows first.
 
 Examples:
 ```
@@ -128,6 +138,16 @@ Round the resulting lat/lng to this many decimal places. This removes floating-p
 
 **Default:** 6
 
+#### `--status-columns`
+
+Add three columns to the output, after `lat` and `lng`:
+
+* `geocode_status`: `SUCCESS`, or why the row failed, e.g. `NO MATCH`. Failures that might work if tried again later start with `TEMPORARY ERROR:`, e.g. `TEMPORARY ERROR: Timed out after 30 seconds`. It's blank for rows that already had a lat/lng in the input.
+* `geocode_location_type`: how precise the match is (Google only). `ROOFTOP` is an exact address; `RANGE_INTERPOLATED` is estimated between two points on the street; `GEOMETRIC_CENTER` is the center of something like a street or area; `APPROXIMATE` is only approximate, e.g. a ZIP code or city center.
+* `geocode_partial_match`: `true` if Google couldn't match the whole address and returned its best guess (Google only). Worth checking by hand, along with anything that isn't `ROOFTOP`.
+
+With `--resume`, rows whose status is a permanent failure are skipped instead of tried again (and paid for). Rows with a `TEMPORARY ERROR` are tried again.
+
 #### `--save-every [rows]`
 
 When writing to an output file, save progress to it every this many geocoded rows. Pressing Ctrl-C also saves before exiting. Each save is a complete copy of the input: rows done so far have a lat/lng, and the rest have blanks. Set to 0 to only write at the end.
@@ -136,7 +156,7 @@ When writing to an output file, save progress to it every this many geocoded row
 
 #### `--resume`
 
-Continue an interrupted run. Rerun the same command with `--resume` added: rows that already have a lat/lng in the output file are kept and skipped, and geocoding picks up from there. Rows that failed before (e.g. `NO MATCH`) are tried again.
+Continue an interrupted run. Rerun the same command with `--resume` added: rows that already have a lat/lng in the output file are kept and skipped, and geocoding picks up from there. Rows that failed before are tried again, unless the run used `--status-columns`: then only rows with a `TEMPORARY ERROR` are, and permanent failures like `NO MATCH` are skipped. (A run that used `--status-columns` keeps them when resumed, even if you leave the flag off.)
 
 ```
 $ csvgeocode input.csv output.csv --url "MY_API_URL"            # interrupted partway
@@ -249,7 +269,7 @@ You can use any basic geocoding service from within a Node script by supplying a
 
 The easiest way to see what a handler should look like is to look at [handlers.js](./src/handlers.js).
 
-The handler function is passed the body of an API response and should either return a string error message or an object with `lat` and `lng` properties. It can also return `{ retry: "message" }` for a temporary problem that's worth retrying, or `{ fatal: "message" }` for one that should stop the whole run (like an invalid API key). If it throws, that's treated as a temporary problem.
+The handler function is passed the body of an API response and should either return a string error message or an object with `lat` and `lng` properties. A successful result can also include `locationType` (a string) and `partialMatch` (`true` or `false`), which fill in the `--status-columns` columns. It can also return `{ retry: "message" }` for a temporary problem that's worth retrying, or `{ fatal: "message" }` for one that should stop the whole run (like an invalid API key). If it throws, that's treated as a temporary problem.
 
 ```js
 

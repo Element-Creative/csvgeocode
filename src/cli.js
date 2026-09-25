@@ -9,20 +9,21 @@ const usage = `Usage: csvgeocode [options] [input CSV] [output CSV]
 With no output CSV, results are written to stdout.
 
 Options:
-  --url         [REQUIRED] A URL template to use, with column names from your input CSV surrounded by {{}}. Example: http://mygeocoder.com/?address={{STREET_ADDRESS}}&apiKey=123ABC
-  --handler     What API handler to use. Built-in options are 'google', 'mapbox', 'osm' and 'tamu'. Default: 'google'
-  --lat         Latitude column name. Default: automatic detection
-  --lng         Longitude column name. Default: automatic detection
-  --delay       Milliseconds to wait between API calls. Default: 250
-  --timeout     Milliseconds to wait for each API response before giving up on that row. Default: 30000
-  --retries     Times to retry a request that failed with a temporary error (network, timeout, rate limit, server error), waiting 2s, 10s, then 30s. Default: 3
-  --precision   Decimal places to round lat/lng to. Default: 6
-  --save-every  Save progress to the output file every N rows, so an interrupted run can be resumed. 0 disables. Default: 100
-  --resume      Continue an interrupted run: rows already geocoded in the output file are kept and skipped
-  --overwrite   Replace the output file if it already exists
-  --force       Re-geocode every row, even input rows that already have a lat/lng. (To replace an existing output file, use --overwrite.) Can't be resumed
-  --verbose     Show some information while csvgeocode is running
-  --help        Show this message`;
+  --url             [REQUIRED] A URL template to use, with column names from your input CSV surrounded by {{}}. Example: http://mygeocoder.com/?address={{STREET_ADDRESS}}&apiKey=123ABC
+  --handler         What API handler to use. Built-in options are 'google', 'mapbox', 'osm' and 'tamu'. Default: 'google'
+  --lat             Latitude column name. Default: automatic detection
+  --lng             Longitude column name. Default: automatic detection
+  --delay           Milliseconds to wait between API calls. Default: 250
+  --timeout         Milliseconds to wait for each API response before giving up on that row. Default: 30000
+  --retries         Times to retry a request that failed with a temporary error (network, timeout, rate limit, server error), waiting 2s, 10s, then 30s. Default: 3
+  --precision       Decimal places to round lat/lng to. Default: 6
+  --status-columns  Add geocode_status, geocode_location_type and geocode_partial_match columns: why a row failed, and how precise each match is (Google)
+  --save-every      Save progress to the output file every N rows, so an interrupted run can be resumed. 0 disables. Default: 100
+  --resume          Continue an interrupted run: rows already geocoded in the output file are kept and skipped
+  --overwrite       Replace the output file if it already exists
+  --force           Re-geocode every row, even input rows that already have a lat/lng. (To replace an existing output file, use --overwrite.) Can't be resumed
+  --verbose         Show some information while csvgeocode is running
+  --help            Show this message`;
 
 //Print a problem with the arguments and exit
 function fail(message) {
@@ -46,6 +47,7 @@ try {
       retries: { type: "string" },
       precision: { type: "string" },
       "save-every": { type: "string" },
+      "status-columns": { type: "boolean" },
       resume: { type: "boolean" },
       overwrite: { type: "boolean" },
       force: { type: "boolean" },
@@ -126,6 +128,8 @@ for (const key of ["resume", "force"]) {
   if (args[key]) options[key] = true;
 }
 
+if (args["status-columns"]) options.statusColumns = true;
+
 if ("delay" in args) options.delay = Number(args.delay);
 if ("timeout" in args) options.timeout = Number(args.timeout);
 if ("retries" in args) options.retries = Number(args.retries);
@@ -145,7 +149,8 @@ geocoder.on("error", function(err) {
 
 geocoder.on("resume", function(progress) {
   if (progress.found) {
-    console.warn("Resuming: " + progress.done + " of " + progress.total + " rows already geocoded in " + output);
+    console.warn("Resuming: " + progress.done + " of " + progress.total + " rows already geocoded in " + output +
+      (progress.failed ? ", and skipping " + progress.failed + " that failed permanently (see geocode_status)" : ""));
   } else {
     console.warn("Nothing to resume: " + output + " doesn't exist yet. Starting from the beginning.");
   }

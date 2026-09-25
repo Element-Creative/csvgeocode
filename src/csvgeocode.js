@@ -44,6 +44,15 @@ export default function generate(input, output, options) {
 //A {{column}} tag in the URL template
 const TEMPLATE_TAG = /\{\{\s*([^{}]+?)\s*\}\}/g;
 
+//Extra output columns with the statusColumns option
+const STATUS = "geocode_status",
+      LOCATION_TYPE = "geocode_location_type",
+      PARTIAL_MATCH = "geocode_partial_match",
+      STATUS_COLUMNS = [STATUS, LOCATION_TYPE, PARTIAL_MATCH];
+
+//Status prefix for failures that are worth trying again later
+const TEMPORARY = "TEMPORARY ERROR: ";
+
 //An error that ends the whole run (after saving progress)
 class StopError extends Error {}
 
@@ -51,8 +60,8 @@ class Geocoder extends EventEmitter {
 
   run(input, output, options) {
 
-    const cache = {}, //Cached results by address
-          resumed = new Set(), //Rows whose lat/lng came from a previous run's output
+    const cache = {}, //Outcomes by URL: results and permanent failures
+          resumed = new Set(), //Rows already done in a previous run's output
           time = Date.now(),
           _this = this;
 
@@ -93,8 +102,15 @@ class Geocoder extends EventEmitter {
       rows = parsed;
 
       if (previous) {
-        resumeFrom(previous);
-        _this.emit("resume", { found: true, done: resumed.size, total: parsed.length });
+
+        //Keep the status columns going if the previous run had them
+        if (previous.columns.includes(STATUS)) {
+          options.statusColumns = true;
+        }
+
+        const failed = resumeFrom(previous);
+        _this.emit("resume", { found: true, done: resumed.size - failed, failed: failed, total: parsed.length });
+
       }
 
       try {
@@ -138,16 +154,20 @@ class Geocoder extends EventEmitter {
         return;
       }
 
-      //Address is cached from a previous result
-      if (cache[url]) {
+      //Same address as an earlier row: reuse its result or permanent failure
+      const cached = cache[url],
+            outcome = cached || await request(url, row);
 
-        row[options.lat] = cache[url].lat;
-        row[options.lng] = cache[url].lng;
+      record(row, outcome);
 
-        _this.emit("row", null, row);
-        return;
-
+      if (!cached) {
+        await sleep(options.delay);
       }
+
+    }
+
+    //Request a URL, retrying temporary problems. Stops the run on a fatal one.
+    async function request(url, row) {
 
       let outcome = await attempt(url);
 
@@ -164,31 +184,37 @@ class Geocoder extends EventEmitter {
         throw new StopError("Stopping: " + outcome.message);
       }
 
-      if (outcome.result) {
-
-        row[options.lat] = outcome.result.lat;
-        row[options.lng] = outcome.result.lng;
-
-        //Cache the result
-        cache[url] = outcome.result;
-        failedInARow = 0;
-        _this.emit("row", null, row);
-
-      } else {
-
-        row[options.lat] = "";
-        row[options.lng] = "";
-
-        failedInARow = outcome.retry ? failedInARow + 1 : 0;
-        _this.emit("row", outcome.message, row);
-
+      //Temporary failures aren't cached, so a later row with the same
+      //address tries again
+      if (!outcome.retry) {
+        cache[url] = outcome;
       }
 
-      await sleep(options.delay);
+      failedInARow = outcome.retry ? failedInARow + 1 : 0;
+
+      return outcome;
 
     }
 
-    //Request one URL. Resolves to { result: {lat, lng} } on success, or
+    //Fill in a row's lat/lng (and status columns) from an outcome
+    function record(row, outcome) {
+
+      const result = outcome.result;
+
+      row[options.lat] = result ? result.lat : "";
+      row[options.lng] = result ? result.lng : "";
+
+      if (options.statusColumns) {
+        row[STATUS] = result ? "SUCCESS" : (outcome.retry ? TEMPORARY : "") + outcome.message;
+        row[LOCATION_TYPE] = result && result.locationType ? result.locationType : "";
+        row[PARTIAL_MATCH] = result && typeof result.partialMatch === "boolean" ? String(result.partialMatch) : "";
+      }
+
+      _this.emit("row", result ? null : outcome.message, row);
+
+    }
+
+    //Request one URL. Resolves to { result: {lat, lng, ...} } on success, or
     //{ message } for a failed row, plus retry: true if it's worth trying
     //again or fatal: true if the whole run should stop.
     async function attempt(url) {
@@ -241,14 +267,16 @@ class Geocoder extends EventEmitter {
       if (result && "lat" in result && "lng" in result) {
 
         //Round off floating-point noise (e.g. -96.68371259999999)
-        if (options.precision !== null && options.precision !== false) {
-          result = {
-            lat: misc.round(result.lat, options.precision),
-            lng: misc.round(result.lng, options.precision)
-          };
-        }
+        const round = options.precision !== null && options.precision !== false;
 
-        return { result: { lat: result.lat, lng: result.lng } };
+        return {
+          result: {
+            lat: round ? misc.round(result.lat, options.precision) : result.lat,
+            lng: round ? misc.round(result.lng, options.precision) : result.lng,
+            locationType: result.locationType,
+            partialMatch: result.partialMatch
+          }
+        };
 
       }
 
@@ -296,32 +324,56 @@ class Geocoder extends EventEmitter {
     }
 
     function needsNoGeocoding(row) {
-      return !options.force && misc.isNumeric(row[options.lat]) && misc.isNumeric(row[options.lng]);
+      return resumed.has(row) || (!options.force && hasCoordinates(row));
     }
 
-    //Copy lat/lngs from a previous run's output onto the input rows, after
-    //checking that the output really came from this same input
+    //Is there a valid lat/lng in the row?
+    function hasCoordinates(row) {
+      return misc.isNumeric(row[options.lat], 90) && misc.isNumeric(row[options.lng], 180);
+    }
+
+    //A failure that retrying won't fix, like NO MATCH
+    function isPermanentFailure(status) {
+      return Boolean(status) && status !== "SUCCESS" && !status.startsWith(TEMPORARY);
+    }
+
+    //Copy lat/lngs (and status columns) from a previous run's output onto the
+    //input rows, after checking that the output really came from this same
+    //input. Rows that were geocoded, or failed permanently, are skipped this
+    //time. Returns the number of permanent failures.
     function resumeFrom(previous) {
 
       if (previous.length !== rows.length) {
         throw new Error("Can't resume: " + output + " has " + previous.length + " rows but " + input + " has " + rows.length + ".");
       }
 
+      const outputColumns = [options.lat, options.lng].concat(options.statusColumns ? STATUS_COLUMNS : []);
+      let failed = 0;
+
       rows.forEach(function(row, i) {
 
+        const before = previous[i];
+
         for (const key in row) {
-          if (key !== options.lat && key !== options.lng && row[key] !== previous[i][key]) {
+          if (!outputColumns.includes(key) && row[key] !== before[key]) {
             throw new Error("Can't resume: row " + (i + 1) + " of " + output + " doesn't match " + input + " (column \"" + key + "\").");
           }
         }
 
-        if (misc.isNumeric(previous[i][options.lat]) && misc.isNumeric(previous[i][options.lng])) {
-          row[options.lat] = previous[i][options.lat];
-          row[options.lng] = previous[i][options.lng];
+        const geocoded = hasCoordinates(before),
+              failedBefore = !geocoded && options.statusColumns && isPermanentFailure(before[STATUS]);
+
+        if (geocoded || failedBefore) {
+          for (const key of outputColumns) {
+            row[key] = before[key] === undefined ? "" : before[key];
+          }
           resumed.add(row);
+          failed += failedBefore ? 1 : 0;
         }
 
       });
+
+      return failed;
 
     }
 
@@ -346,7 +398,7 @@ class Geocoder extends EventEmitter {
     }
 
     function successful(row) {
-      return misc.isNumeric(row[options.lat]) && misc.isNumeric(row[options.lng]);
+      return hasCoordinates(row);
     }
 
     //Make sure every {{column}} in the URL template is a real column, so a

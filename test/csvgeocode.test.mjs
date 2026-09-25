@@ -121,6 +121,20 @@ describe("geocoding", () => {
     assert.match(read(path.join(dir, "out.csv")), new RegExp("^Again,addr 1," + rounded(rawLat(1)) + ",", "m"));
   });
 
+  it("only requests an address that failed permanently once, but retries temporary failures", async () => {
+    writeFixture(dir, "in.csv", 0, ["A,nomatch", "B,http500", "C,nomatch", "D,http500"]);
+    const { stderr } = await cli(["in.csv", "out.csv", "--retries", "0", "--verbose"]);
+    assert.deepEqual(server.requests.map(r => r.address), ["nomatch", "http500", "http500"]);
+    assert.match(stderr, /^NO MATCH \| C,nomatch,,$/m);
+  });
+
+  it("re-geocodes a row whose latitude is out of range", async () => {
+    fs.writeFileSync(path.join(dir, "in.csv"), "ADDRESS,lat,lng\naddr 1,95,20\naddr 2,45,170\n");
+    await cli(["in.csv", "out.csv"]);
+    assert.deepEqual(server.requests.map(r => r.address), ["addr 1"]);
+    assert.match(read(path.join(dir, "out.csv")), /^addr 2,45,170$/m);
+  });
+
   it("leaves failed rows blank and keeps going", async () => {
     writeFixture(dir, "in.csv", 0, ["A,nomatch", "B,garbage", "C,http500", "D,addr 4"]);
     const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose", "--retries", "0"]);
@@ -234,6 +248,62 @@ describe("temporary and fatal errors", () => {
     const { code } = await cli(["in.csv", "out.csv", "--retries", "0"]);
     assert.equal(code, 0);
     assert.equal(server.requests.length, 9);
+  });
+
+});
+
+describe("--status-columns", () => {
+
+  const coords = n => rounded(rawLat(n)) + "," + rounded(rawLng(n));
+
+  it("adds each row's status, location type and partial-match flag", async () => {
+    writeFixture(dir, "in.csv", 1, ["B,partial 2", "C,nomatch", "D,http500"]);
+    const { code } = await cli(["in.csv", "out.csv", "--status-columns", "--retries", "0"]);
+    assert.equal(code, 0);
+    assert.equal(read(path.join(dir, "out.csv")), [
+      "NAME,ADDRESS,lat,lng,geocode_status,geocode_location_type,geocode_partial_match",
+      "Place 1,addr 1," + coords(1) + ",SUCCESS,ROOFTOP,false",
+      "B,partial 2," + coords(2) + ",SUCCESS,APPROXIMATE,true",
+      "C,nomatch,,,NO MATCH,,",
+      "D,http500,,,TEMPORARY ERROR: HTTP Status 500,,"
+    ].join("\n"));
+  });
+
+  it("isn't added without the flag", async () => {
+    writeFixture(dir, "in.csv", 1);
+    await cli(["in.csv", "out.csv"]);
+    assert.equal(rowsOf(path.join(dir, "out.csv")).header, "NAME,ADDRESS,lat,lng");
+  });
+
+  it("resumes an interrupted run to the same result as an uninterrupted one", async () => {
+    writeFixture(dir, "in.csv", 40, ["X,nomatch"]);
+    await cli(["in.csv", "out.csv", "--status-columns", "--delay", "30"], {
+      onSpawn: async child => {
+        await waitFor(() => server.requests.length >= 5);
+        child.kill("SIGINT");
+      }
+    });
+    await cli(["in.csv", "out.csv", "--resume"]);
+    await cli(["in.csv", "reference.csv", "--status-columns"]);
+    assert.equal(read(path.join(dir, "out.csv")), read(path.join(dir, "reference.csv")));
+  });
+
+  it("lets --resume skip permanent failures but retry temporary ones", async () => {
+    writeFixture(dir, "in.csv", 1, ["C,nomatch", "D,http500"]);
+    await cli(["in.csv", "out.csv", "--status-columns", "--retries", "0"]);
+    server.reset();
+
+    //No --status-columns: resuming keeps them going
+    const { code, stderr } = await cli(["in.csv", "out.csv", "--resume", "--retries", "0"]);
+    assert.equal(code, 0);
+    assert.match(stderr, /Resuming: 1 of 3 rows already geocoded in out\.csv, and skipping 1 that failed permanently \(see geocode_status\)/);
+    assert.deepEqual(server.requests.map(r => r.address), ["http500"]);
+    assert.equal(read(path.join(dir, "out.csv")), [
+      "NAME,ADDRESS,lat,lng,geocode_status,geocode_location_type,geocode_partial_match",
+      "Place 1,addr 1," + coords(1) + ",SUCCESS,ROOFTOP,false",
+      "C,nomatch,,,NO MATCH,,",
+      "D,http500,,,TEMPORARY ERROR: HTTP Status 500,,"
+    ].join("\n"));
   });
 
 });
