@@ -150,6 +150,38 @@ describe("geocoding", () => {
 
 });
 
+describe("input checks", () => {
+
+  it("handles Excel's byte order mark, and keeps it in the output", async () => {
+    fs.writeFileSync(path.join(dir, "in.csv"), "\uFEFFADDRESS,CITY\naddr 1,Dallas\n");
+    const { code } = await cli(["in.csv", "out.csv"]);
+    assert.equal(code, 0);
+    assert.equal(server.requests[0].address, "addr 1");
+    assert.equal(read(path.join(dir, "out.csv")), "\uFEFFADDRESS,CITY,lat,lng\naddr 1,Dallas," + rounded(rawLat(1)) + "," + rounded(rawLng(1)));
+
+    server.reset();
+    const resumed = await cli(["in.csv", "out.csv", "--resume"]);
+    assert.match(resumed.stderr, /Resuming: 1 of 1 rows/);
+    assert.equal(server.requests.length, 0);
+  });
+
+  it("refuses a URL template that uses a column the file doesn't have", async () => {
+    fs.writeFileSync(path.join(dir, "in.csv"), "ADDRESS,CITY\naddr 1,Dallas\n");
+    const { code, stderr } = await cli(["in.csv", "out.csv"], { template: "{{ADDRESS}},{{CITTY}},{{STATE}}" });
+    assert.equal(code, 1);
+    assert.match(stderr, /^The URL uses \{\{CITTY\}\}, \{\{STATE\}\}, but in\.csv has no columns with those names\. Its columns are: ADDRESS, CITY$/m);
+    assert.equal(server.requests.length, 0);
+    assert.deepEqual(fs.readdirSync(dir), ["in.csv"]);
+  });
+
+  it("suggests the right column name for a case mismatch", async () => {
+    fs.writeFileSync(path.join(dir, "in.csv"), "ADDRESS,CITY\naddr 1,Dallas\n");
+    const { stderr } = await cli(["in.csv", "out.csv"], { template: "{{address}}" });
+    assert.match(stderr, /^The URL uses \{\{address\}\}, but in\.csv has no column with that name\. Did you mean \{\{ADDRESS\}\}\? Its columns are: ADDRESS, CITY$/m);
+  });
+
+});
+
 describe("temporary and fatal errors", () => {
 
   it("retries a temporary error and then succeeds", { timeout: 20000 }, async () => {
@@ -432,6 +464,13 @@ describe("Node module API", () => {
     assert.equal(rows[0].err, "HTTP Status 503");
     assert.equal(rows[0].row.lat, "");
     assert.equal(server.requests.length, 2);
+  });
+
+  it("emits an error for a URL template column that doesn't exist", async () => {
+    const input = writeFixture(dir, "in.csv", 1);
+    const err = await new Promise(resolve => geocode(input, { url: server.url("{{NOPE}}"), test: true }).on("error", resolve));
+    assert.match(err.message, /The URL uses \{\{NOPE\}\}/);
+    assert.equal(server.requests.length, 0);
   });
 
   it("throws right away without a url or with an unknown handler", () => {

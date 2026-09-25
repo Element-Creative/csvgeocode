@@ -41,6 +41,9 @@ export default function generate(input, output, options) {
 
 }
 
+//A {{column}} tag in the URL template
+const TEMPLATE_TAG = /\{\{\s*([^{}]+?)\s*\}\}/g;
+
 //An error that ends the whole run (after saving progress)
 class StopError extends Error {}
 
@@ -69,6 +72,8 @@ class Geocoder extends EventEmitter {
 
       const parsed = await csv.read(input);
       let previous = null;
+
+      checkTemplate(parsed.columns);
 
       //Pick up where a previous run left off, if its output exists
       if (options.resume && typeof output === "string") {
@@ -341,10 +346,35 @@ class Geocoder extends EventEmitter {
       return misc.isNumeric(row[options.lat]) && misc.isNumeric(row[options.lng]);
     }
 
+    //Make sure every {{column}} in the URL template is a real column, so a
+    //typo doesn't quietly geocode (and pay for) partial addresses
+    function checkTemplate(columns) {
+
+      const missing = templateColumns(options.url).filter(column => !columns.includes(column));
+
+      if (!missing.length) {
+        return;
+      }
+
+      const tags = missing.map(column => "{{" + column + "}}"),
+            suggestions = missing.map(column => columns.find(c => c.trim().toLowerCase() === column.toLowerCase()))
+              .filter(Boolean).map(column => "{{" + column + "}}");
+
+      throw new Error("The URL uses " + tags.join(", ") + ", but " + input + " has no " +
+        (missing.length > 1 ? "columns with those names" : "column with that name") + "." +
+        (suggestions.length ? " Did you mean " + suggestions.join(", ") + "?" : "") +
+        " Its columns are: " + columns.join(", "));
+
+    }
+
+    function templateColumns(template) {
+      return Array.from(template.matchAll(TEMPLATE_TAG), match => match[1]);
+    }
+
     //Fill each {{column}} in the URL template with that column's value,
     //URL-encoded (spaces as +). Unknown columns become empty.
     function fillTemplate(template, row) {
-      return template.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, function(tag, column) {
+      return template.replace(TEMPLATE_TAG, function(tag, column) {
         return column in row ? encodeURIComponent(row[column]).replace(/%20/g, "+") : "";
       });
     }

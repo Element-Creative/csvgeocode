@@ -54,6 +54,8 @@ https://maps.googleapis.com/maps/api/geocode/json?address={{address}}&key=MY_API
 http://geoservices.tamu.edu/Services/Geocode/WebService/GeocoderWebServiceHttpNonParsed_V04_01.aspx?apiKey=MY_API_KEY&version=4.01&streetAddress={{address}}&city={{city}}&state={{state}}
 ```
 
+Before making any requests, csvgeocode checks that every `{{column}}` in the URL is a column in your CSV (names are case-sensitive), so a typo can't quietly geocode partial addresses. CSVs saved by Excel as "CSV UTF-8" are handled too: the invisible marker at the start of the file is ignored when matching column names and kept in the output file.
+
 If your addresses are broken up into multiple columns (e.g. a street_address column, a city column, and a state column), you can use them all together in a URL template:
 
 ```
