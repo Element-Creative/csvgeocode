@@ -44,7 +44,7 @@ The only required option is `url`.  All others are optional.
 
 #### `--url [url]` (REQUIRED)
 
-A URL template with column names as [Mustache tags](http://mustache.github.io/), like:
+A URL template with column names in double curly braces, like `{{address}}`. Each one is replaced with that column's value for the row, URL-encoded (spaces become `+`; apostrophes, `&`, `#` and so on are safe). For example:
 
 ```
 http://api.tiles.mapbox.com/v4/geocode/mapbox.places/{{address}}.json?access_token=MY_API_KEY
@@ -90,6 +90,12 @@ The name of the column that should contain the resulting longitude.  If this col
 The number of milliseconds to wait between geocoding calls.  Setting this to 0 is probably a bad idea because most geocoders limit how fast you can make requests.
 
 **Default:** 250
+
+#### `--timeout [milliseconds]`
+
+How long to wait for each API response. If there's no answer in time, that row fails with `Timed out after N seconds` and csvgeocode moves on, instead of hanging (e.g. after your laptop sleeps or switches networks).
+
+**Default:** 30000
 
 #### `--force`
 

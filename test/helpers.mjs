@@ -41,6 +41,9 @@ export async function startServer() {
   const sockets = new Set();
 
   const server = http.createServer((req, res) => {
+    //No keep-alive: on Node 26, fetch reusing a plain-http localhost
+    //connection after a pause stalls for up to 500ms (not seen over https)
+    res.setHeader("Connection", "close");
     const url = new URL(req.url, "http://localhost");
     const address = url.searchParams.get("address") ?? "";
     const key = url.searchParams.get("key");
@@ -112,6 +115,15 @@ export function runCli(args, { cwd, onSpawn } = {}) {
     child.on("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
     if (onSpawn) onSpawn(child);
   });
+}
+
+// A localhost port with nothing listening on it
+export async function closedPort() {
+  const probe = http.createServer();
+  await new Promise(resolve => probe.listen(0, "127.0.0.1", resolve));
+  const port = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
+  return port;
 }
 
 export function tempDir() {

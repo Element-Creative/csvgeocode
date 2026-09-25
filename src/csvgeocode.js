@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import { EventEmitter } from "node:events";
-import request from "request";
-import mustache from "mustache";
+import { setTimeout as sleep } from "node:timers/promises";
 import * as misc from "./misc.js";
 import * as csv from "./csv.js";
 import defaults from "./defaults.js";
@@ -91,7 +90,7 @@ class Geocoder extends EventEmitter {
 
       for (const row of rows) {
         const skipped = needsNoGeocoding(row);
-        await new Promise(resolve => codeRow(row, resolve));
+        await codeRow(row);
         done++;
         if (!skipped && options.saveEvery > 0 && ++unsaved >= options.saveEvery && done < rows.length) {
           saveProgress();
@@ -102,9 +101,9 @@ class Geocoder extends EventEmitter {
 
     }
 
-    function codeRow(row, cb) {
+    async function codeRow(row) {
 
-      const url = mustache.render(options.url, escape(row));
+      const url = fillTemplate(options.url, row);
 
       //Doesn't need geocoding
       if (needsNoGeocoding(row)) {
@@ -112,7 +111,7 @@ class Geocoder extends EventEmitter {
         if (!resumed.has(row)) {
           _this.emit("row", null, row);
         }
-        return cb();
+        return;
       }
 
       //Address is cached from a previous result
@@ -122,34 +121,31 @@ class Geocoder extends EventEmitter {
         row[options.lng] = cache[url].lng;
 
         _this.emit("row", null, row);
-        return cb();
+        return;
 
       }
 
-      request.get(url, function(err, response, body) {
+      let response, body;
 
-        //Some other error
-        if (err) {
+      try {
+        response = await fetch(url, { signal: AbortSignal.timeout(options.timeout) });
+        body = await response.text();
+      } catch (e) {
+        _this.emit("row", describeError(e), row);
+        return;
+      }
 
-          _this.emit("row", err.toString(), row);
-          return cb();
+      if (response.status !== 200) {
+        _this.emit("row", "HTTP Status " + response.status, row);
+        return;
+      }
 
-        } else if (response.statusCode !== 200) {
-
-          _this.emit("row", "HTTP Status " + response.statusCode, row);
-          return cb();
-
-        } else {
-
-          handleResponse(body, row, url, cb);
-
-        }
-
-      });
+      handleResponse(body, row, url);
+      await sleep(options.delay);
 
     }
 
-    function handleResponse(body, row, url, cb) {
+    function handleResponse(body, row, url) {
 
       let result;
 
@@ -192,8 +188,14 @@ class Geocoder extends EventEmitter {
 
       }
 
-      setTimeout(cb, options.delay);
+    }
 
+    //A readable message for a request that got no response
+    function describeError(e) {
+      if (e.name === "TimeoutError") {
+        return "Timed out after " + (options.timeout / 1000) + " seconds";
+      }
+      return "Network error: " + (e.cause && e.cause.message ? e.cause.message : e.message);
     }
 
     async function complete(results) {
@@ -270,14 +272,12 @@ class Geocoder extends EventEmitter {
       return misc.isNumeric(row[options.lat]) && misc.isNumeric(row[options.lng]);
     }
 
-    function escape(row) {
-      const escaped = { ...row };
-
-      for (const key in escaped) {
-        escaped[key] = encodeURIComponent(escaped[key]).replace(/(%20| )/g, "+").replace(/[&]/g, "%26");
-      }
-
-      return escaped;
+    //Fill each {{column}} in the URL template with that column's value,
+    //URL-encoded (spaces as +). Unknown columns become empty.
+    function fillTemplate(template, row) {
+      return template.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, function(tag, column) {
+        return column in row ? encodeURIComponent(row[column]).replace(/%20/g, "+") : "";
+      });
     }
 
   }

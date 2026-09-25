@@ -14,6 +14,7 @@ Options:
   --lat         Latitude column name. Default: automatic detection
   --lng         Longitude column name. Default: automatic detection
   --delay       Milliseconds to wait between API calls. Default: 250
+  --timeout     Milliseconds to wait for each API response before giving up on that row. Default: 30000
   --precision   Decimal places to round lat/lng to. Default: 6
   --save-every  Save progress to the output file every N rows, so an interrupted run can be resumed. 0 disables. Default: 100
   --resume      Continue an interrupted run: rows already geocoded in the output file are kept and skipped
@@ -40,6 +41,7 @@ try {
       lat: { type: "string" },
       lng: { type: "string" },
       delay: { type: "string" },
+      timeout: { type: "string" },
       precision: { type: "string" },
       "save-every": { type: "string" },
       resume: { type: "boolean" },
@@ -64,6 +66,10 @@ if (args.url === undefined) {
 
 if ("delay" in args && isNaN(Number(args.delay))) {
   fail("--delay requires a numeric value in milliseconds.");
+}
+
+if ("timeout" in args && !(/^\d+$/.test(args.timeout) && Number(args.timeout) > 0)) {
+  fail("--timeout requires a whole number of milliseconds, greater than 0.");
 }
 
 if ("precision" in args && !/^\d+$/.test(args.precision)) {
@@ -115,6 +121,7 @@ for (const key of ["resume", "force"]) {
 }
 
 if ("delay" in args) options.delay = Number(args.delay);
+if ("timeout" in args) options.timeout = Number(args.timeout);
 if ("precision" in args) options.precision = Number(args.precision);
 if ("save-every" in args) options.saveEvery = Number(args["save-every"]);
 

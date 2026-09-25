@@ -31,8 +31,6 @@
   },
   "homepage": "https://github.com/Element-Creative/csvgeocode",
   "dependencies": {
-    "d3-dsv": "^3.0.1",
-    "mustache": "^2.2.1",
-    "request": "^2.53.0"
+    "d3-dsv": "^3.0.1"
   }
 }

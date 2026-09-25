@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  ROOT, startServer, runCli, tempDir, writeFixture, read, rowsOf, waitFor, rawLat, rawLng, rounded
+  ROOT, startServer, runCli, tempDir, closedPort, writeFixture, read, rowsOf, waitFor, rawLat, rawLng, rounded
 } from "./helpers.mjs";
 
 let server, dir;
@@ -54,6 +54,39 @@ describe("geocoding", () => {
     await cli(["in.csv", "out.csv"], { template: "{{STREET}},{{CITY}}" });
     assert.equal(server.requests[0].address, "addr 5,Dallas");
     assert.equal(server.requests[0].key, "TESTKEY");
+  });
+
+  it("sends addresses with apostrophes, ampersands and other symbols intact", async () => {
+    const addresses = ["1234 O'Connor Rd addr 7", "A&B Plaza addr 8", "Høvik #9 addr 9", "50% + more addr 10", "St. Mary's (rear) addr 11"];
+    writeFixture(dir, "in.csv", 0, addresses.map((a, i) => "P" + i + "," + a));
+    const { stderr } = await cli(["in.csv", "out.csv", "--verbose"]);
+    assert.deepEqual(server.requests.map(r => r.address), addresses);
+    assert.deepEqual(server.requests.map(r => r.key), addresses.map(() => "TESTKEY"));
+    assert.equal(stderr.match(/^SUCCESS \| /gm).length, addresses.length);
+  });
+
+  it("allows spaces inside {{ }} in the URL template", async () => {
+    writeFixture(dir, "in.csv", 1);
+    await cli(["in.csv", "out.csv"], { template: "{{ ADDRESS }}" });
+    assert.equal(server.requests[0].address, "addr 1");
+  });
+
+  it("gives up on a request that doesn't answer within --timeout and moves on", { timeout: 20000 }, async () => {
+    writeFixture(dir, "in.csv", 0, ["A,hang", "B,addr 2"]);
+    const start = Date.now();
+    const { code, stderr } = await cli(["in.csv", "out.csv", "--verbose", "--timeout", "300"]);
+    assert.equal(code, 0);
+    assert.match(stderr, /^Timed out after 0\.3 seconds \| A,hang$/m);
+    assert.match(stderr, /^SUCCESS \| B,addr 2,/m);
+    assert.ok(Date.now() - start < 10000);
+  });
+
+  it("reports network errors on the row", async () => {
+    writeFixture(dir, "in.csv", 1);
+    const url = "http://127.0.0.1:" + (await closedPort()) + "/?a={{ADDRESS}}";
+    const { code, stderr } = await runCli(["in.csv", "out.csv", "--verbose", "--delay", "0", "--url", url], { cwd: dir });
+    assert.equal(code, 0);
+    assert.match(stderr, /^Network error: .*ECONNREFUSED.* \| Place 1,addr 1$/m);
   });
 
   it("detects existing latitude/longitude columns and fills them in place", async () => {
@@ -241,7 +274,8 @@ describe("command-line checks", () => {
     [["in.csv", "out.csv", "--resume", "--overwrite"], /--resume and --overwrite can't be used together\./],
     [["in.csv", "out.csv", "--delay", "abc"], /--delay requires a numeric value in milliseconds\./],
     [["in.csv", "out.csv", "--precision", "x"], /--precision requires a whole number of decimal places\./],
-    [["in.csv", "out.csv", "--save-every", "x"], /--save-every requires a whole number of rows\./]
+    [["in.csv", "out.csv", "--save-every", "x"], /--save-every requires a whole number of rows\./],
+    [["in.csv", "out.csv", "--timeout", "0"], /--timeout requires a whole number of milliseconds, greater than 0\./]
   ];
 
   for (const [args, message] of refusals) {
